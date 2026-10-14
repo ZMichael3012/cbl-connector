@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -31,6 +32,7 @@ import (
 	"github.com/cbl/cbl-kit/outbox/kafkapub"
 	"github.com/cbl/cbl-kit/storagex"
 
+	"github.com/cbl/cbl-connector/internal/storage"
 	"github.com/cbl/cbl-connector/internal/usecase"
 )
 
@@ -83,6 +85,30 @@ func main() {
 		return
 	}
 	normalizer := usecase.NewNormalizer(registry, log)
+
+	// Правила маршрутизации (3.4): источник истины - PostgreSQL; Redis - только
+	// кеш, его отсутствие или сбой не влияет на выбор. Реестр провайдеров и
+	// Router подключаются задачей 3.2 (KI-01).
+	ruleStore := storage.NewRouteRulesRepository(db)
+	var ruleCache usecase.RouteConfigCacheStore
+	if redisAddr := os.Getenv("REDIS_ADDR"); redisAddr != "" {
+		redisClient := redis.NewClient(&redis.Options{
+			Addr:                  redisAddr,
+			Password:              os.Getenv("REDIS_PASSWORD"),
+			DialTimeout:           200 * time.Millisecond,
+			ReadTimeout:           100 * time.Millisecond,
+			WriteTimeout:          100 * time.Millisecond,
+			ContextTimeoutEnabled: true,
+		})
+		defer func() { _ = redisClient.Close() }()
+		ruleCache = storage.NewRouteConfigCache(redisClient)
+	}
+	ruleSource := usecase.NewCachedRouteRules(ruleStore, ruleCache, usecase.RouteCacheTTLFromEnv(os.Getenv), log)
+	if rules, loadErr := ruleSource.Load(ctx); loadErr != nil {
+		log.Warn("routing rules load failed", zap.Error(loadErr))
+	} else {
+		log.Info("routing rules loaded", zap.Int("rules", len(rules)))
+	}
 
 	if brokers := os.Getenv("KAFKA_BROKERS"); brokers != "" {
 		brokerList := strings.Split(brokers, ",")

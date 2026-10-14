@@ -314,6 +314,12 @@ func (r *Resilient) VerifyWebhook(headers map[string][]string, rawBody []byte) (
 	return r.inner.VerifyWebhook(headers, rawBody)
 }
 
+// Available сообщает, что breaker не открыт: провайдер может получать трафик
+// (роутер 3.4 исключает недоступных провайдеров, пока есть альтернатива).
+func (r *Resilient) Available() bool {
+	return r.breaker.State() != gobreaker.StateOpen
+}
+
 // Capabilities пробрасывается напрямую: локальные данные адаптера.
 func (r *Resilient) Capabilities() domain.Capabilities {
 	if r.inner == nil {

@@ -70,6 +70,10 @@ func TestRouteRequestValidate(t *testing.T) {
 		{Network: "", Asset: "USDT", Operation: "invoice"},
 		{Network: "tron", Asset: " ", Operation: "invoice"},
 		{Network: "tron", Asset: "USDT", Operation: ""},
+		{Network: "tron", Asset: "USDT", Operation: "invoice"},
+		{Network: "tron", Asset: "USDT", Operation: "invoice", Amount: money.MustParse("0.00", "USDT", 2)},
+		{Network: "tron", Asset: "USDT", Operation: "invoice", Amount: money.MustParse("-1.00", "USDT", 2)},
+		{Network: "tron", Asset: "USDT", Operation: "invoice", Amount: money.MustParse("10.00", "BTC", 2)},
 	}
 	for _, req := range invalid {
 		require.ErrorIs(t, req.Validate(), domain.ErrInvalidRoute)

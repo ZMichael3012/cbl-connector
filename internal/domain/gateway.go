@@ -282,6 +282,8 @@ type NetworkCapability struct {
 	Asset string
 	// MinAmount задает минимальную сумму.
 	MinAmount money.Money
+	// MaxAmount задает максимальную сумму (0 - без лимита).
+	MaxAmount money.Money
 	// ConfirmationDepth задает глубину подтверждений.
 	ConfirmationDepth uint32
 }
@@ -322,7 +324,8 @@ type RouteRequest struct {
 	Operation string
 }
 
-// Validate проверяет обязательные поля запроса маршрутизации.
+// Validate проверяет обязательные поля запроса маршрутизации:
+// операцию, сеть, актив и положительную сумму того же актива.
 func (r RouteRequest) Validate() error {
 	if strings.TrimSpace(r.Network) == "" {
 		return fmt.Errorf("%w: empty network", ErrInvalidRoute)
@@ -332,6 +335,12 @@ func (r RouteRequest) Validate() error {
 	}
 	if strings.TrimSpace(r.Operation) == "" {
 		return fmt.Errorf("%w: empty operation", ErrInvalidRoute)
+	}
+	if r.Amount.MinorUnits <= 0 {
+		return fmt.Errorf("%w: non-positive amount", ErrInvalidRoute)
+	}
+	if r.Amount.Asset != r.Asset {
+		return fmt.Errorf("%w: amount asset %q does not match %q", ErrInvalidRoute, r.Amount.Asset, r.Asset)
 	}
 	return nil
 }

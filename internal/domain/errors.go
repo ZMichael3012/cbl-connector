@@ -12,4 +12,10 @@ var (
 	ErrUnsupportedNetwork = errors.New("connector: unsupported network or asset")
 	// ErrProviderUnavailable сообщает о недоступности провайдера.
 	ErrProviderUnavailable = errors.New("connector: provider unavailable")
+	// ErrUnsignedWebhook сообщает о вебхуке без подтвержденной подписи.
+	ErrUnsignedWebhook = errors.New("connector: webhook signature not verified")
+	// ErrUnknownProvider сообщает о вебхуке неизвестного провайдера.
+	ErrUnknownProvider = errors.New("connector: unknown provider")
+	// ErrInvalidWebhook сообщает о некорректном теле вебхука.
+	ErrInvalidWebhook = errors.New("connector: invalid webhook payload")
 )

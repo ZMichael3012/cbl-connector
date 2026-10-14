@@ -1,10 +1,21 @@
-.PHONY: build test vet lint fmt vuln up down
+.PHONY: build test test-integration test-e2e smoke vet lint fmt vuln up down
 
 build:
 	go build ./...
 
 test:
 	go test ./...
+
+test-integration:
+	go test -tags integration -count=1 ./internal/...
+
+# test-e2e запускает сквозной сценарий нормализатора на testcontainers Kafka+PostgreSQL.
+test-e2e:
+	go test -tags e2e -count=1 ./test/e2e/
+
+# smoke поднимает compose-стенд и проверяет запуск конвейера нормализации.
+smoke:
+	powershell -NoProfile -File test/e2e/smoke.ps1
 
 vet:
 	go vet ./...

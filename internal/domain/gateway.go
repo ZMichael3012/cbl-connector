@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/cbl/cbl-kit/money"
 )
 
@@ -159,6 +161,83 @@ type CanonicalEvent struct {
 	Confirmations uint32
 	// OccurredAt задает время события.
 	OccurredAt time.Time
+}
+
+// Ограничения полей канонического события: недоверенный вход не должен
+// раздувать ключи Kafka, конверт outbox и сообщения retry/DLQ (review 3.5).
+const (
+	maxGatewayIDLen = 128
+	maxTXIDLen      = 256
+	maxNetworkLen   = 64
+	maxProviderLen  = 64
+	minAssetLen     = 2
+	maxAssetLen     = 16
+)
+
+// Validate проверяет обязательные поля канонического события перед публикацией.
+func (e CanonicalEvent) Validate() error {
+	if _, err := uuid.Parse(strings.TrimSpace(e.PaymentID)); err != nil {
+		return fmt.Errorf("%w: payment_id must be uuid", ErrInvalidWebhook)
+	}
+	if !validPrintable(e.GatewayID, maxGatewayIDLen) {
+		return fmt.Errorf("%w: invalid gateway_id", ErrInvalidWebhook)
+	}
+	if !validPrintable(e.Provider, maxProviderLen) {
+		return fmt.Errorf("%w: invalid provider", ErrInvalidWebhook)
+	}
+	switch e.Type {
+	case StateDetected, StateConfirmed, StateFailed, StateExpired, StateUnderpaid, StateOverpaid:
+	default:
+		return fmt.Errorf("%w: unknown event type %q", ErrInvalidWebhook, e.Type)
+	}
+	if e.OccurredAt.IsZero() {
+		return fmt.Errorf("%w: zero occurred_at", ErrInvalidWebhook)
+	}
+	if e.TXID != "" && !validPrintable(e.TXID, maxTXIDLen) {
+		return fmt.Errorf("%w: invalid txid", ErrInvalidWebhook)
+	}
+	if e.Network != "" && !validCode(e.Network, maxNetworkLen) {
+		return fmt.Errorf("%w: invalid network", ErrInvalidWebhook)
+	}
+	if !validCode(e.ReceivedAmount.Asset, maxAssetLen) || len(e.ReceivedAmount.Asset) < minAssetLen {
+		return fmt.Errorf("%w: invalid received_amount asset", ErrInvalidWebhook)
+	}
+	if e.ReceivedAmount.Decimals > money.MaxDecimals {
+		return fmt.Errorf("%w: decimals %d over limit", ErrInvalidWebhook, e.ReceivedAmount.Decimals)
+	}
+	if e.ReceivedAmount.MinorUnits < 0 {
+		return fmt.Errorf("%w: negative received_amount", ErrInvalidWebhook)
+	}
+	return nil
+}
+
+// validPrintable проверяет непустое значение с видимыми ASCII-символами в пределах длины.
+func validPrintable(value string, maxLen int) bool {
+	if value == "" || len(value) > maxLen {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x20 || value[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// validCode проверяет код (актив, сеть): латиница, цифры, дефис и подчеркивание.
+func validCode(value string, maxLen int) bool {
+	if value == "" || len(value) > maxLen {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		b := value[i]
+		switch {
+		case b >= 'A' && b <= 'Z', b >= 'a' && b <= 'z', b >= '0' && b <= '9', b == '-', b == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // PayoutRequest описывает запрос выплаты провайдеру.

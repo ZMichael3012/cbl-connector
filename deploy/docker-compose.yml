@@ -71,6 +71,18 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
+  kafka-init:
+    image: apache/kafka:3.7.0
+    depends_on:
+      kafka: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        for topic in gateway.webhooks.raw gateway.webhooks.raw.retry.5s gateway.webhooks.raw.retry.1m gateway.webhooks.raw.retry.10m gateway.webhooks.raw.dlq gateway.events.canonical gateway.events.canonical.retry.5s gateway.events.canonical.retry.1m gateway.events.canonical.retry.10m gateway.events.canonical.dlq; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists --topic "$$topic" --partitions 1 --replication-factor 1
+        done
+    networks: [cbl-net]
+
   connector:
     profiles: ["app"]
     build:
@@ -82,6 +94,8 @@ services:
       METRICS_ADDR: ":9250"
       PG_DSN: postgres://cbl:cbl@postgres:5432/connector?sslmode=disable
       KAFKA_BROKERS: kafka:29092
+      KAFKA_CONSUMER_GROUP: cbl-connector-webhooks
+      CONNECTOR_SANDBOX_PROVIDERS: mock
       REDIS_ADDR: redis:6379
     ports:
       - "8050:8050"
@@ -91,6 +105,7 @@ services:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
       kafka: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
     networks: [cbl-net]
 
 volumes:

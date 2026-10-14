@@ -1,4 +1,5 @@
-// main запускает HTTP- и gRPC-сервис connector платформы CBL.
+// main запускает HTTP- и gRPC-сервис connector платформы CBL:
+// конвейер нормализации вебхуков провайдера в канонические события.
 package main
 
 import (
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,12 +20,22 @@ import (
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 
 	"github.com/cbl/cbl-kit/ginmw"
 	"github.com/cbl/cbl-kit/grpcmw"
+	"github.com/cbl/cbl-kit/inbox"
+	"github.com/cbl/cbl-kit/inbox/kafkaconsumer"
+	"github.com/cbl/cbl-kit/outbox"
+	"github.com/cbl/cbl-kit/outbox/kafkapub"
+	"github.com/cbl/cbl-kit/storagex"
+
+	"github.com/cbl/cbl-connector/internal/usecase"
 )
 
-// main поднимает административный HTTP-сервер и gRPC-сервер connector.
+// main поднимает административный HTTP-сервер, gRPC-сервер, relay outbox
+// и консьюмер нормализации вебхуков; завершает работу по SIGINT/SIGTERM.
 // Регистрация ConnectorService появится в задаче 3.2 вместе с адаптером провайдера.
 func main() {
 	log, err := zap.NewProduction()
@@ -32,8 +44,86 @@ func main() {
 	}
 	defer func() { _ = log.Sync() }()
 
+	dsn := os.Getenv("PG_DSN")
+	if dsn == "" {
+		log.Error("PG_DSN is required")
+		return
+	}
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		log.Error("connect postgres failed", zap.Error(err))
+		return
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	migrationsDir := getenv("MIGRATIONS_DIR", "./migrations")
+	if migrateErr := storagex.Migrate(ctx, db, migrationsDir); migrateErr != nil {
+		log.Error("apply migrations failed", zap.String("dir", migrationsDir), zap.Error(migrateErr))
+		return
+	}
+
+	decoders := make([]usecase.WebhookDecoder, 0, 2)
+	for _, provider := range splitCSV(getenv("CONNECTOR_SANDBOX_PROVIDERS", "mock")) {
+		decoder, decodeErr := usecase.NewSandboxDecoder(provider)
+		if decodeErr != nil {
+			log.Error("build sandbox decoder failed", zap.String("provider", provider), zap.Error(decodeErr))
+			return
+		}
+		decoders = append(decoders, decoder)
+	}
+	if len(decoders) == 0 {
+		log.Error("CONNECTOR_SANDBOX_PROVIDERS is empty: no webhook decoders configured")
+		return
+	}
+	registry, err := usecase.NewDecoderRegistry(decoders...)
+	if err != nil {
+		log.Error("build decoder registry failed", zap.Error(err))
+		return
+	}
+	normalizer := usecase.NewNormalizer(registry, log)
+
+	if brokers := os.Getenv("KAFKA_BROKERS"); brokers != "" {
+		brokerList := strings.Split(brokers, ",")
+		publisher, pubErr := kafkapub.New(brokerList)
+		if pubErr != nil {
+			log.Error("kafka publisher failed", zap.Error(pubErr))
+			return
+		}
+		defer publisher.Close()
+
+		relay := outbox.NewRelay(db, publisher, log)
+		go func() {
+			if runErr := relay.Run(ctx); runErr != nil && !errors.Is(runErr, context.Canceled) {
+				log.Error("outbox relay stopped", zap.Error(runErr))
+			}
+		}()
+
+		group := getenv("KAFKA_CONSUMER_GROUP", "cbl-connector-webhooks")
+		processor := inbox.NewProcessor(group, db, inbox.NewGuard(), normalizer, publisher,
+			inbox.NewRouter(usecase.TopicGatewayWebhooksRaw, 3), log)
+		topics := []string{
+			usecase.TopicGatewayWebhooksRaw,
+			usecase.TopicGatewayWebhooksRaw + inbox.RetrySuffix5s,
+			usecase.TopicGatewayWebhooksRaw + inbox.RetrySuffix1m,
+			usecase.TopicGatewayWebhooksRaw + inbox.RetrySuffix10m,
+		}
+		runner, runErr := kafkaconsumer.New(brokerList, group, topics, processor, log)
+		if runErr != nil {
+			log.Error("webhook consumer failed", zap.Error(runErr))
+			return
+		}
+		defer runner.Close()
+		go func() {
+			if consumeErr := runner.Run(ctx); consumeErr != nil && !errors.Is(consumeErr, context.Canceled) {
+				log.Error("webhook consumer stopped", zap.Error(consumeErr))
+			}
+		}()
+		log.Info("webhook normalizer started", zap.String("group", group))
+	} else {
+		log.Warn("KAFKA_BROKERS is empty: webhook normalizer disabled")
+	}
 
 	httpAddr := getenv("HTTP_ADDR", ":8050")
 	grpcAddr := getenv("GRPC_ADDR", ":9050")
@@ -126,4 +216,16 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// splitCSV разбирает список значений из переменной окружения через запятую.
+func splitCSV(raw string) []string {
+	parts := strings.Split(raw, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			values = append(values, trimmed)
+		}
+	}
+	return values
 }

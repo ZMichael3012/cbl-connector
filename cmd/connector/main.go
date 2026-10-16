@@ -98,7 +98,11 @@ func main() {
 		log.Error("build decoder registry failed", zap.Error(err))
 		return
 	}
-	normalizer := usecase.NewNormalizer(registry, log)
+	// The provider invoice mapping resolves platform payments of real provider
+	// webhooks (17.2, T-CONNECTOR-03); fetch_required deliveries stay fail
+	// closed until the adapters of 17.6 - 17.9 register a status fetcher.
+	invoiceMapping := storage.NewProviderInvoicesRepository(db)
+	normalizer := usecase.NewNormalizer(registry, log, usecase.WithPaymentMapping(invoiceMapping))
 
 	// Routing rules (3.4): PostgreSQL is the source of truth; Redis is only a
 	// cache, and its absence or failure does not affect the selection. The provider

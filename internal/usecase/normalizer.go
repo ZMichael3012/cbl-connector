@@ -39,26 +39,71 @@ const (
 // traceparentPattern validates the W3C trace context format before propagation.
 var traceparentPattern = regexp.MustCompile(`^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$`)
 
+// PaymentMapping resolves the platform payment of a provider invoice; the
+// provider_invoices repository implements it (17.2, T-CONNECTOR-03).
+type PaymentMapping interface {
+	// ByGatewayID returns the mapping of a provider invoice.
+	ByGatewayID(ctx context.Context, provider, gatewayID string) (domain.ProviderInvoice, error)
+}
+
+// PaymentStatusFetcher fetches the authoritative payment status at the
+// provider; fetch_required deliveries (CoinGate, BitPay) are never trusted from
+// the webhook body alone (CF-4 hardening).
+type PaymentStatusFetcher interface {
+	// FetchPaymentStatus returns the canonical status of the provider invoice.
+	FetchPaymentStatus(ctx context.Context, provider, gatewayID string) (domain.PaymentStatus, error)
+}
+
+// NormalizerOption configures the Normalizer.
+type NormalizerOption func(*Normalizer)
+
+// WithPaymentMapping sets the provider invoice mapping used to resolve
+// payment_id when the delivery does not carry it.
+func WithPaymentMapping(mapping PaymentMapping) NormalizerOption {
+	return func(n *Normalizer) {
+		if mapping != nil {
+			n.mapping = mapping
+		}
+	}
+}
+
+// WithPaymentFetcher sets the fetch-to-verify source of fetch_required
+// deliveries; without it such deliveries fail closed.
+func WithPaymentFetcher(fetcher PaymentStatusFetcher) NormalizerOption {
+	return func(n *Normalizer) {
+		if fetcher != nil {
+			n.fetcher = fetcher
+		}
+	}
+}
+
 // Normalizer turns raw webhooks into canonical events through the outbox.
 // It implements inbox.Handler: it is called inside the guard transaction, so the
 // envelope is published atomically with the processing mark.
 type Normalizer struct {
 	registry *DecoderRegistry
+	mapping  PaymentMapping
+	fetcher  PaymentStatusFetcher
 	store    *outbox.Store
 	log      *zap.Logger
 }
 
 // NewNormalizer creates a Normalizer on top of the decoder registry.
-func NewNormalizer(registry *DecoderRegistry, log *zap.Logger) *Normalizer {
+func NewNormalizer(registry *DecoderRegistry, log *zap.Logger, opts ...NormalizerOption) *Normalizer {
 	if log == nil {
 		log = zap.NewNop()
 	}
-	return &Normalizer{registry: registry, store: outbox.NewStore(), log: log}
+	normalizer := &Normalizer{registry: registry, store: outbox.NewStore(), log: log}
+	for _, opt := range opts {
+		opt(normalizer)
+	}
+	return normalizer
 }
 
 // Handle parses a raw webhook, decodes it and writes the canonical event to the outbox.
-// An unsigned webhook, an unknown provider and broken bodies return an error:
-// the inbox Processor sends the message to the retry topic and then to the DLQ.
+// A non-verified webhook, an unknown provider, a missing mapping and broken bodies
+// return an error: the inbox Processor sends the message to the retry topic and
+// then to the DLQ (fail closed, CF-4).
 func (n *Normalizer) Handle(ctx context.Context, tx *gorm.DB, msg inbox.Message) error {
 	if len(msg.Value) > maxRawMessageBytes {
 		return fmt.Errorf("%w: raw message too large", domain.ErrInvalidWebhook)
@@ -68,14 +113,18 @@ func (n *Normalizer) Handle(ctx context.Context, tx *gorm.DB, msg inbox.Message)
 		return fmt.Errorf("%w: unmarshal raw webhook: %w", domain.ErrInvalidWebhook, err)
 	}
 	provider := strings.TrimSpace(raw.GetProvider())
-	if !raw.GetSignatureVerified() { //nolint:staticcheck // SA1019: replaced by signature_state in the 17.2 part 2 fetch-to-verify rework
-		return fmt.Errorf("%w: provider %q", domain.ErrUnsignedWebhook, provider)
+	if state := verificationState(&raw); state != eventsv1.WebhookSignatureState_WEBHOOK_SIGNATURE_STATE_VERIFIED {
+		return fmt.Errorf("%w: provider %q state %s", domain.ErrUnsignedWebhook, provider, state)
 	}
-	decoder, ok := n.registry.Decoder(provider)
-	if !ok {
-		return fmt.Errorf("%w: %q", domain.ErrUnknownProvider, provider)
+	var (
+		event domain.CanonicalEvent
+		err   error
+	)
+	if raw.GetFetchRequired() {
+		event, err = n.fetchCanonical(ctx, &raw, provider)
+	} else {
+		event, err = n.decodeCanonical(ctx, &raw, provider)
 	}
-	event, err := decoder.Decode(ctx, &raw)
 	if err != nil {
 		return err
 	}
@@ -96,6 +145,96 @@ func (n *Normalizer) Handle(ctx context.Context, tx *gorm.DB, msg inbox.Message)
 		zap.String("type", string(event.Type)),
 	)
 	return nil
+}
+
+// verificationState resolves the CF-4 verification result with the transition
+// fallback: a producer that has not migrated sets only the deprecated
+// signature_verified flag (gateway_events.proto, cf-4).
+func verificationState(raw *eventsv1.GatewayWebhookRaw) eventsv1.WebhookSignatureState {
+	if state := raw.GetSignatureState(); state != eventsv1.WebhookSignatureState_WEBHOOK_SIGNATURE_STATE_UNSPECIFIED {
+		return state
+	}
+	if raw.GetSignatureVerified() { //nolint:staticcheck // SA1019: transition fallback until all producers set signature_state
+		return eventsv1.WebhookSignatureState_WEBHOOK_SIGNATURE_STATE_VERIFIED
+	}
+	return eventsv1.WebhookSignatureState_WEBHOOK_SIGNATURE_STATE_ABSENT
+}
+
+// decodeCanonical decodes the delivery through the provider decoder and
+// resolves payment_id through the mapping when the body does not carry it.
+func (n *Normalizer) decodeCanonical(ctx context.Context, raw *eventsv1.GatewayWebhookRaw, provider string) (domain.CanonicalEvent, error) {
+	decoder, ok := n.registry.Decoder(provider)
+	if !ok {
+		return domain.CanonicalEvent{}, fmt.Errorf("%w: %q", domain.ErrUnknownProvider, provider)
+	}
+	event, err := decoder.Decode(ctx, raw)
+	if err != nil {
+		return domain.CanonicalEvent{}, err
+	}
+	if strings.TrimSpace(event.PaymentID) == "" {
+		paymentID, resolveErr := n.resolvePayment(ctx, provider, raw.GetGatewayId())
+		if resolveErr != nil {
+			return domain.CanonicalEvent{}, resolveErr
+		}
+		event.PaymentID = paymentID
+	}
+	return event, nil
+}
+
+// fetchCanonical builds the canonical event from the provider status re-check:
+// fetch_required deliveries must never be trusted from the body, and without an
+// adapter the delivery fails closed (the status model decides, 3.4).
+func (n *Normalizer) fetchCanonical(ctx context.Context, raw *eventsv1.GatewayWebhookRaw, provider string) (domain.CanonicalEvent, error) {
+	if n.fetcher == nil {
+		return domain.CanonicalEvent{}, fmt.Errorf("%w: provider %q requires fetch but no adapter is registered", domain.ErrProviderUnavailable, provider)
+	}
+	gatewayID := strings.TrimSpace(raw.GetGatewayId())
+	if gatewayID == "" || gatewayID == "unknown" {
+		return domain.CanonicalEvent{}, fmt.Errorf("%w: provider %q fetch requires a gateway id", domain.ErrInvalidWebhook, provider)
+	}
+	status, err := n.fetcher.FetchPaymentStatus(ctx, provider, gatewayID)
+	if err != nil {
+		return domain.CanonicalEvent{}, fmt.Errorf("usecase: fetch payment status for provider %q: %w", provider, err)
+	}
+	paymentID := strings.TrimSpace(status.PaymentID)
+	if paymentID == "" {
+		paymentID, err = n.resolvePayment(ctx, provider, gatewayID)
+		if err != nil {
+			return domain.CanonicalEvent{}, err
+		}
+	}
+	occurredAt := status.GatewayEventTS
+	if occurredAt.IsZero() {
+		occurredAt = time.Now().UTC()
+	}
+	return domain.CanonicalEvent{
+		Type:           status.State,
+		PaymentID:      paymentID,
+		GatewayID:      gatewayID,
+		Provider:       provider,
+		TXID:           status.TXID,
+		Network:        status.Network,
+		ReceivedAmount: status.ReceivedAmount,
+		Confirmations:  status.Confirmations,
+		OccurredAt:     occurredAt,
+	}, nil
+}
+
+// resolvePayment resolves the platform payment through the provider invoice
+// mapping: real provider webhooks do not carry our payment_id.
+func (n *Normalizer) resolvePayment(ctx context.Context, provider, gatewayID string) (string, error) {
+	if n.mapping == nil {
+		return "", fmt.Errorf("%w: provider %q has no payment mapping", domain.ErrInvalidWebhook, provider)
+	}
+	gatewayID = strings.TrimSpace(gatewayID)
+	if gatewayID == "" || gatewayID == "unknown" {
+		return "", fmt.Errorf("%w: provider %q has no gateway id for the mapping", domain.ErrInvalidWebhook, provider)
+	}
+	invoice, err := n.mapping.ByGatewayID(ctx, provider, gatewayID)
+	if err != nil {
+		return "", fmt.Errorf("usecase: resolve payment of provider %q: %w", provider, err)
+	}
+	return invoice.PaymentID, nil
 }
 
 // buildCanonicalEnvelope builds the canonical event envelope: the partition key is

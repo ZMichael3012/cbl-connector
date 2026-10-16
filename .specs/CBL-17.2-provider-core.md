@@ -50,10 +50,15 @@ FR-4 (part 1, done). Provider invoice mapping: migration `00005_provider_invoice
 sentinel); integration tests on real PostgreSQL cover the round trip, the duplicate save
 and the validation.
 
-FR-5 (part 2). Fetch-to-verify pipeline in the normalizer: consume `signature_state` and
-`fetch_required` (CF-4), fail closed on non-verified raws, resolve `payment_id` through the
-mapping, fetch via the adapter and compare before publishing a canonical event; mismatch or
-fetch failure goes to the DLQ.
+FR-5 (part 2, done). Fetch-to-verify pipeline: the normalizer resolves the CF-4 state
+(`signature_state`, with the transition fallback to the deprecated `signature_verified`) and
+fails closed on any non-verified delivery; ordinary deliveries decode through the provider
+decoder and resolve `payment_id` through the provider invoice mapping when the body does not
+carry it; `fetch_required` deliveries (CoinGate, BitPay) skip the decoders and build the
+canonical event from the adapter `FetchPaymentStatus` re-check (the status model decides,
+occurred_at falls back to the receipt time), and without a registered fetcher, gateway id or
+mapping they fail closed into retry/DLQ. `main` wires the mapping repository; the fetcher
+arrives with the adapters 17.6 - 17.9.
 
 FR-6 (part 2, loader done). Capabilities loader: `usecase.CapabilitiesLoader` aggregates
 adapter capabilities through an injectable cache (Redis in production) with live fallback on

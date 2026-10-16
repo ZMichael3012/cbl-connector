@@ -55,12 +55,20 @@ FR-5 (part 2). Fetch-to-verify pipeline in the normalizer: consume `signature_st
 mapping, fetch via the adapter and compare before publishing a canonical event; mismatch or
 fetch failure goes to the DLQ.
 
-FR-6 (part 2). Capabilities loader: aggregate adapter capabilities with a Redis cache, TTL
-and static fallback; serve `GetCapabilities` with the provider filter.
+FR-6 (part 2, loader done). Capabilities loader: `usecase.CapabilitiesLoader` aggregates
+adapter capabilities through an injectable cache (Redis in production) with live fallback on
+a cache miss or error, provider filtering (`ErrProviderNotFound`), provider-qualified rows and
+stable ordering; `CapabilityCache` (Load/Save with TTL) and `CapabilitySource` ports keep the
+usecase infrastructure-free. Remaining: wiring into `GetCapabilities` with the Redis
+implementation and the `GetCapabilities` provider filter in the transport.
 
-FR-7 (part 2). Per-provider limiter and clients: kit `ratelimit` decorator over adapters
-(shared Redis bucket, local fallback), `Pause` on provider `Retry-After`, wiring of the
-manifest limits; register `ConnectorService` on gRPC using the Router and the registry.
+FR-7 (part 2, limiter done). Per-provider limiter: `gateway.Limited` decorates any
+`PaymentGateway` with the kit `ratelimit` port (shared Redis bucket, local fallback), keys
+`<provider>:<op>` so the kit prefix yields the CBL-003 `rl:provider:<provider>:<op>` form;
+a denied token returns `ErrProviderOverloaded` without touching the adapter, a limiter
+storage failure fails open (the provider 429 is absorbed by `PauseProvider`, which drains the
+invoice/status/payout buckets with the provider `Retry-After`). Remaining: manifest-limit
+wiring in main and the `ConnectorService` gRPC transport over the Router.
 
 FR-8 (part 2). `providers` table and admin visibility (17.15 consumes it); payout/refund
 operations surface through `ConnectorService` once adapters exist (17.6 - 17.9, 17.11).

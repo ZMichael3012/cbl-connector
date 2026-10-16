@@ -1,29 +1,29 @@
-# CBL-3.1. Интерфейс PaymentGateway и каноническая модель
+# CBL-3.1. PaymentGateway interface and canonical model
 
-| Поле | Значение |
+| Field | Value |
 | :-- | :-- |
-| Эпик | E3, Gateway Connector |
-| Репозиторий | `cbl-connector` |
-| Размер | M |
-| Волна и параллельная группа | W1-CONNECTOR |
-| Зависит от | 1.7 (CF-1), 1.4 |
-| Версия контрактов | `cbl-protos@cf-1` (`billing/connector/v1`, `billing/events/v1`) |
-| Статус | done (локально, ожидает коммита) |
+| Epic | E3, Gateway Connector |
+| Repository | `cbl-connector` |
+| Size | M |
+| Wave and parallel group | W1-CONNECTOR |
+| Depends on | 1.7 (CF-1), 1.4 |
+| Contract version | `cbl-protos@cf-1` (`billing/connector/v1`, `billing/events/v1`) |
+| Status | done (locally, awaiting commit) |
 
-## 1. Контекст и цель
+## 1. Context and goal
 
-Единый порт для внешних крипто-шлюзов и каноническая модель статусов: адаптеры (3.2, 10.3)
-переводят провайдерские статусы и события в одну модель, доменные сервисы не знают о шлюзах
-(`CBL-000`, раздел 2).
+A single port for external crypto gateways and a canonical status model: adapters (3.2, 10.3)
+translate provider statuses and events into one model, domain services know nothing about
+gateways (`CBL-000`, section 2).
 
-## 2. Границы
+## 2. Boundaries
 
-In scope: Go-интерфейс `PaymentGateway`, доменные модели, маппинг статусов, интерфейс роутера.
-Out of scope: конкретные адаптеры (3.2), устойчивость (3.3), нормализатор Kafka (3.5).
+In scope: the Go interface `PaymentGateway`, domain models, status mapping, the router interface.
+Out of scope: concrete adapters (3.2), resilience (3.3), the Kafka normalizer (3.5).
 
-## 3. Функциональные требования
+## 3. Functional requirements
 
-FR-1. Интерфейс (internal/domain):
+FR-1. Interface (internal/domain):
 
 ```go
 type PaymentGateway interface {
@@ -36,21 +36,21 @@ type PaymentGateway interface {
 }
 ```
 
-FR-2. Канонические модели (money только `cbl-kit/money.Money`; поля соответствуют
-`billing/connector/v1` и `billing/events/v1`, актив `Invoice` выражается через `Amount.Asset`):
+FR-2. Canonical models (money only via `cbl-kit/money.Money`; fields correspond to
+`billing/connector/v1` and `billing/events/v1`, the `Invoice` asset is expressed through `Amount.Asset`):
 `Invoice{GatewayID, Provider, Address, Network, Amount, ExpiresAt}`;
 `PaymentStatus{GatewayID, PaymentID, Provider, State, ReceivedAmount, Confirmations, TXID,
 Network, GatewayEventTS}`; `CanonicalEvent{Type, PaymentID, GatewayID, Provider, TXID, Network,
 ReceivedAmount, Confirmations, OccurredAt}`; `PayoutStatus{State, TXID, Fee, Reason}`;
 `Capabilities{Provider, Networks map[string]NetworkCapability{Asset, MinAmount, ConfirmationDepth}}`.
 
-FR-3. Канонические состояния: `detected`, `confirmed`, `failed`, `expired`, `underpaid`,
-`overpaid`; выплата: `submitted`, `confirmed`, `failed`. Маппинг провайдерских строк в эти
-состояния выполняет адаптер через helpers `CanonicalState(raw string) (State, error)` и
-`CanonicalPayoutState(raw string) (PayoutState, error)`; таблицы псевдонимов остаются
-внутренними, наружу экспортируются только функции маппинга.
+FR-3. Canonical states: `detected`, `confirmed`, `failed`, `expired`, `underpaid`,
+`overpaid`; payout: `submitted`, `confirmed`, `failed`. The adapter maps provider strings
+into these states via the helpers `CanonicalState(raw string) (State, error)` and
+`CanonicalPayoutState(raw string) (PayoutState, error)`; alias tables stay internal,
+and only the mapping functions are exported.
 
-FR-4. Роутер (интерфейс, реализация в 3.4):
+FR-4. Router (interface, implementation in 3.4):
 
 ```go
 type Router interface {
@@ -59,68 +59,68 @@ type Router interface {
 type RouteRequest struct { Network, Asset string; Amount money.Money; Operation string }
 ```
 
-FR-5. Домен возвращает sentinel-ошибки (`ErrUnknownState`, `ErrInvalidRoute`,
-`ErrUnsupportedNetwork`, `ErrProviderUnavailable`); маппинг в `grpcmw.E` (not_found,
-unavailable, invalid_argument) выполняется транспортным слоем задач 3.2/3.4. Таймауты и
-ретраи не реализуются в этом слое (3.3).
+FR-5. The domain returns sentinel errors (`ErrUnknownState`, `ErrInvalidRoute`,
+`ErrUnsupportedNetwork`, `ErrProviderUnavailable`); the mapping into `grpcmw.E` (not_found,
+unavailable, invalid_argument) is performed by the transport layer of tasks 3.2/3.4. Timeouts
+and retries are not implemented in this layer (3.3).
 
-FR-6. Локальные зависимости: `replace` на `../cbl-kit` (money) и `../cbl-protos` (добавлен
-авансом, используется с задач 3.2/3.5).
+FR-6. Local dependencies: `replace` for `../cbl-kit` (money) and `../cbl-protos` (added
+in advance, used from tasks 3.2/3.5).
 
-## 4. Контракты
+## 4. Contracts
 
-Типы сверяются с `billing/connector/v1` (`CanonicalPaymentStatus`, `Capability`) и
-`billing/events/v1` (`CanonicalPaymentEvent`, `GatewayPayoutEvent`); маппинг 1:1, поля не
-расширяются без обновления `cbl-protos`.
+The types are verified against `billing/connector/v1` (`CanonicalPaymentStatus`, `Capability`) and
+`billing/events/v1` (`CanonicalPaymentEvent`, `GatewayPayoutEvent`); the mapping is 1:1, and fields are
+not extended without updating `cbl-protos`.
 
-## 5. Модель данных и миграции
+## 5. Data model and migrations
 
-Хранилище адаптеров и логи вызовов - задача 3.4 (`connector` database); здесь миграции нет.
+Adapter storage and call logs are task 3.4 (`connector` database); there is no migration here.
 
-## 6. Конечные автоматы
+## 6. State machines
 
-Канонические состояния и запрет переходов не по порядку контролирует Payment (4.3); Connector
-обязан публиковать события монотонно по `gateway_event_ts` и не скрывать повторы.
+Payment controls canonical states and forbids out-of-order transitions (4.3); Connector
+must publish events monotonically by `gateway_event_ts` and must not hide duplicates.
 
 ## 7. Edge cases
 
-Неизвестный провайдерский статус (ошибка `invalid_argument`, событие не публикуется),
-отсутствующие поля в ответе шлюза, расхождение суммы и актива, пустой TXID, дубликат события
-(обрабатывается Payment/inbox), сеть не поддерживается провайдером.
+An unknown provider status (an `invalid_argument` error, the event is not published),
+missing fields in the gateway response, an amount and asset mismatch, an empty TXID, a duplicate event
+(handled by Payment/inbox), a network unsupported by the provider.
 
-## 8. Нефункциональные требования
+## 8. Non-functional requirements
 
-Интерфейс не зависит от HTTP-клиента провайдера; unit-тесты без сети. Готовность к набору
-контрактных тестов 3.7: тестовый двойник адаптера.
+The interface does not depend on the provider HTTP client; unit tests run without network. Readiness for the
+contract test suite 3.7: a test double of the adapter.
 
-## 9. План тестов
+## 9. Test plan
 
-| Уровень | Сценарии |
+| Level | Scenarios |
 | :-- | :-- |
 | Smoke | `go build ./...` |
-| Unit | маппинг статусов всех состояний и ошибок, валидация RouteRequest, Capabilities |
-| Integration | не применимо (появляется в 3.2) |
-| E2E | не применимо |
-| Load | не применимо |
+| Unit | status mapping for all states and errors, RouteRequest validation, Capabilities |
+| Integration | not applicable (appears in 3.2) |
+| E2E | not applicable |
+| Load | not applicable |
 
-## 10. План работ и коммит
+## 10. Work plan and commit
 
-Коммит `CBL-3.1: интерфейс PaymentGateway и каноническая модель`; спека в том же коммите.
+Commit `CBL-3.1: PaymentGateway interface and canonical model`; the spec is part of the same commit.
 
-## 11. Открытые вопросы
+## 11. Open questions
 
-- Провайдер номер 1 не выбран (KI-01): адаптер 3.2 стартует после фиксации провайдера,
-  разработка ведется на `cbl-mock-gateway` (3.6).
+- Provider number 1 is not chosen (KI-01): adapter 3.2 starts after the provider is fixed,
+  development proceeds on `cbl-mock-gateway` (3.6).
 
-## 12. Ревью (CBL-001, шаг 6)
+## 12. Review (CBL-001, step 6)
 
-Четыре независимых прохода (13 - 14.10.2026); blocker и major не найдены, замечания minor
-закрыты правками спеки и репозитория.
+Four independent passes (13 - 14.10.2026); no blocker or major findings were found, minor comments
+were closed by edits to the spec and the repository.
 
-| Роль | Ключевые замечания | Закрытие |
+| Role | Key findings | Closure |
 | :-- | :-- | :-- |
-| Без контекста | расхождение FR-2 с реализацией (`Asset` внутри `Amount`, `Provider` в статусах) | FR-2 приведена к контрактам `billing/connector/v1` и `events/v1` |
-| Архитектуры | `VerifyWebhook` дублирует ответственность Webhook Ingress | граница зафиксирована: подпись проверяет Ingress, Connector доверяет `signature_verified` (3.5) |
-| С контекстом | нет `replace` на `../cbl-protos`; домен не маппится в `grpcmw.E` | replace добавлен; FR-5 уточнена: маппинг выполняет транспорт 3.2/3.4 |
-| Безопасности | замечаний по коду нет (нет внешних вызовов и секретов); зависимости обновлены | закрыто обновлением Go 1.26 и kit |
+| No context | FR-2 diverged from the implementation (`Asset` inside `Amount`, `Provider` in statuses) | FR-2 was aligned with the `billing/connector/v1` and `events/v1` contracts |
+| Architecture | `VerifyWebhook` duplicated the Webhook Ingress responsibility | the boundary is fixed: Ingress verifies the signature, Connector trusts `signature_verified` (3.5) |
+| With context | no `replace` for `../cbl-protos`; the domain was not mapped into `grpcmw.E` | replace added; FR-5 clarified: the mapping is performed by the transport layer of tasks 3.2/3.4 |
+| Security | no code findings (no external calls or secrets); dependencies updated | closed by the Go 1.26 and kit update |
 

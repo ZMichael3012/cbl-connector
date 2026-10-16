@@ -1,8 +1,8 @@
 //go:build e2e
 
-// Пакет e2e содержит сквозной сценарий нормализатора connector: сырой вебхук
-// из Kafka превращается в каноническое событие, дубликаты подавляются,
-// неподписанные события уходят в DLQ. Стенд: реальные Kafka и PostgreSQL.
+// Package e2e contains the end-to-end scenario of the connector normalizer: a raw webhook
+// from Kafka is transformed into a canonical event, duplicates are suppressed,
+// and unsigned events go to the DLQ. The stand uses real Kafka and PostgreSQL.
 package e2e
 
 import (
@@ -39,14 +39,14 @@ import (
 	"github.com/cbl/cbl-connector/internal/usecase"
 )
 
-// Топики стенда: вход, канонический выход и DLQ.
+// Stand topics: input, canonical output, and DLQ.
 const (
 	rawTopic       = "gateway.webhooks.raw"
 	canonicalTopic = "gateway.events.canonical"
 	dlqTopic       = rawTopic + ".dlq"
 )
 
-// e2eBody - валидный вебхук sandbox-провайдера из спеки CBL-3.5.
+// e2eBody is a valid sandbox provider webhook from the CBL-3.5 spec.
 const e2eBody = `{
   "payment_id": "01a138fd-0000-7000-8000-000000000003", "gateway_id": "inv-e2e", "status": "confirmed",
   "received_amount": {"minor_units": 250000, "asset": "USDT", "decimals": 2},
@@ -54,7 +54,7 @@ const e2eBody = `{
   "event_ts": "2026-10-14T12:00:05Z"
 }`
 
-// e2ePaymentID задает UUID платежа из e2eBody.
+// e2ePaymentID is the payment UUID from e2eBody.
 const e2ePaymentID = "01a138fd-0000-7000-8000-000000000003"
 
 func setupPostgres(t *testing.T) *gorm.DB {
@@ -110,7 +110,7 @@ func setupKafka(t *testing.T) []string {
 	return brokers
 }
 
-// rawRecord собирает Kafka-сообщение сырого вебхука.
+// rawRecord builds the Kafka message of a raw webhook.
 func rawRecord(t *testing.T, eventID, body string, verified bool) *kgo.Record {
 	t.Helper()
 	raw := &eventsv1.GatewayWebhookRaw{
@@ -134,8 +134,8 @@ func rawRecord(t *testing.T, eventID, body string, verified bool) *kgo.Record {
 	}
 }
 
-// pollRecord ждет записи в топике до timeout; PollFetches вызывается с коротким
-// дедлайном, иначе при отсутствии сообщений он блокируется бессрочно.
+// pollRecord waits for a record in the topic until the timeout; PollFetches is
+// called with a short deadline, otherwise it blocks indefinitely when there are no messages.
 func pollRecord(t *testing.T, consumer *kgo.Client, timeout time.Duration) *kgo.Record {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -198,13 +198,13 @@ func TestE2ENormalizerPipeline(t *testing.T) {
 	require.NoError(t, err)
 	defer canonicalConsumer.Close()
 
-	// Шаг 1: валидный вебхук превращается в каноническое событие.
+	// Step 1: a valid webhook is transformed into a canonical event.
 	firstID := uuid.Must(uuid.NewV7()).String()
 	require.NoError(t, producer.ProduceSync(ctx, rawRecord(t, firstID, e2eBody, true)).FirstErr())
 
 	record := pollRecord(t, canonicalConsumer, 45*time.Second)
-	require.NotNil(t, record, "каноническое событие не доставлено за 45 секунд")
-	assert.Equal(t, e2ePaymentID, string(record.Key), "ключ партиции - payment_id")
+	require.NotNil(t, record, "the canonical event was not delivered within 45 seconds")
+	assert.Equal(t, e2ePaymentID, string(record.Key), "the partition key is payment_id")
 
 	var payload eventsv1.CanonicalPaymentEvent
 	require.NoError(t, proto.Unmarshal(record.Value, &payload))
@@ -216,16 +216,16 @@ func TestE2ENormalizerPipeline(t *testing.T) {
 	assert.Equal(t, uint32(5), payload.GetConfirmations())
 	assert.Equal(t, "0xe2e", payload.GetTxid())
 
-	// Шаг 2: повторная доставка того же raw-события не создает второй конверт.
+	// Step 2: redelivery of the same raw event does not create a second envelope.
 	require.NoError(t, producer.ProduceSync(ctx, rawRecord(t, firstID, e2eBody, true)).FirstErr())
-	assert.Nil(t, pollRecord(t, canonicalConsumer, 3*time.Second), "дубликат не должен публиковаться")
+	assert.Nil(t, pollRecord(t, canonicalConsumer, 3*time.Second), "the duplicate must not be published")
 	var outboxCount, inboxCount int64
 	require.NoError(t, db.Model(&outbox.Record{}).Count(&outboxCount).Error)
 	require.NoError(t, db.Table("inbox").Count(&inboxCount).Error)
-	assert.Equal(t, int64(1), outboxCount, "дубликат не создает второй конверт в outbox")
+	assert.Equal(t, int64(1), outboxCount, "the duplicate does not create a second envelope in the outbox")
 	assert.Equal(t, int64(1), inboxCount)
 
-	// Шаг 3: неподписанный вебхук уходит в DLQ, каноническое событие не публикуется.
+	// Step 3: an unsigned webhook goes to the DLQ, the canonical event is not published.
 	unsignedID := uuid.Must(uuid.NewV7()).String()
 	require.NoError(t, producer.ProduceSync(ctx, rawRecord(t, unsignedID, e2eBody, false)).FirstErr())
 
@@ -238,7 +238,7 @@ func TestE2ENormalizerPipeline(t *testing.T) {
 	defer dlqConsumer.Close()
 
 	dlqRecord := pollRecord(t, dlqConsumer, 45*time.Second)
-	require.NotNil(t, dlqRecord, "неподписанный вебхук не доставлен в DLQ за 45 секунд")
+	require.NotNil(t, dlqRecord, "the unsigned webhook was not delivered to the DLQ within 45 seconds")
 	assert.Equal(t, "mock:inv-e2e", string(dlqRecord.Key))
 	var errorHeader string
 	for _, header := range dlqRecord.Headers {
@@ -247,21 +247,21 @@ func TestE2ENormalizerPipeline(t *testing.T) {
 		}
 	}
 	assert.Contains(t, errorHeader, "signature not verified")
-	assert.Nil(t, pollRecord(t, canonicalConsumer, 2*time.Second), "неподписанный вебхук не нормализуется")
+	assert.Nil(t, pollRecord(t, canonicalConsumer, 2*time.Second), "the unsigned webhook is not normalized")
 
-	// Шаг 4: poison pill с гигантским event_ts (security review) уходит в DLQ
-	// с ограниченной ошибкой, и конвейер не блокируется: следующее валидное
-	// событие доходит до canonical.
+	// Step 4: a poison pill with a giant event_ts (security review) goes to the DLQ
+	// with a bounded error, and the pipeline is not blocked: the next valid
+	// event reaches canonical.
 	poisonID := uuid.Must(uuid.NewV7()).String()
 	poisonBody := `{"payment_id":"` + e2ePaymentID + `","gateway_id":"inv-e2e","status":"confirmed",` +
 		`"received_amount":{"minor_units":1,"asset":"USDT","decimals":2},"event_ts":"` +
 		strings.Repeat("2", 600*(1<<10)) + `"}`
 	require.NoError(t, producer.ProduceSync(ctx, rawRecord(t, poisonID, poisonBody, true)).FirstErr())
 	poisonRecord := pollRecord(t, dlqConsumer, 45*time.Second)
-	require.NotNil(t, poisonRecord, "poison pill не доставлен в DLQ за 45 секунд")
+	require.NotNil(t, poisonRecord, "the poison pill was not delivered to the DLQ within 45 seconds")
 
 	recoveryBody := strings.Replace(e2eBody, `"status": "confirmed"`, `"status": "detected"`, 1)
 	require.NoError(t, producer.ProduceSync(ctx, rawRecord(t, uuid.Must(uuid.NewV7()).String(), recoveryBody, true)).FirstErr())
 	recovery := pollRecord(t, canonicalConsumer, 45*time.Second)
-	require.NotNil(t, recovery, "конвейер заблокирован poison pill")
+	require.NotNil(t, recovery, "the pipeline is blocked by the poison pill")
 }

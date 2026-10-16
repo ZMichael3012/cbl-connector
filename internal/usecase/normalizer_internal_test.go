@@ -17,7 +17,7 @@ import (
 	"github.com/cbl/cbl-connector/internal/domain"
 )
 
-// testPaymentID задает UUID платежа для тестов конверта.
+// testPaymentID specifies the payment UUID for envelope tests.
 const testPaymentID = "01a138fd-0000-7000-8000-000000000001"
 
 func canonicalEvent(state domain.State) domain.CanonicalEvent {
@@ -52,7 +52,7 @@ func TestBuildCanonicalEnvelope(t *testing.T) {
 	assert.Equal(t, "mock", envelope.Headers["provider"])
 	assert.Equal(t, "gw-1", envelope.Headers["gateway_id"])
 	assert.Equal(t, "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-		envelope.Headers[outbox.HeaderTraceparent], "traceparent пробрасывается")
+		envelope.Headers[outbox.HeaderTraceparent], "traceparent is propagated")
 	assert.Equal(t, "2026-10-14T12:00:00Z", envelope.Headers[outbox.HeaderOccurredAt])
 
 	var payload eventsv1.CanonicalPaymentEvent
@@ -78,7 +78,7 @@ func TestBuildCanonicalEnvelopeDropsInvalidTraceparent(t *testing.T) {
 		envelope, err := buildCanonicalEnvelope(canonicalEvent(domain.StateDetected), incoming)
 		require.NoError(t, err)
 		_, ok := envelope.Headers[outbox.HeaderTraceparent]
-		assert.False(t, ok, "некорректный traceparent %q отбрасывается", traceparent)
+		assert.False(t, ok, "an invalid traceparent %q is dropped", traceparent)
 	}
 }
 
@@ -88,7 +88,7 @@ func TestBuildCanonicalEnvelopeWithoutTraceparent(t *testing.T) {
 	envelope, err := buildCanonicalEnvelope(canonicalEvent(domain.StateDetected), nil)
 	require.NoError(t, err)
 	_, ok := envelope.Headers[outbox.HeaderTraceparent]
-	assert.False(t, ok, "без входящего traceparent заголовок не добавляется")
+	assert.False(t, ok, "without an incoming traceparent the header is not added")
 }
 
 func TestCanonicalEventTypeMapping(t *testing.T) {

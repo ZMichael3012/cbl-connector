@@ -3,3 +3,5 @@ bin/
 coverage.out
 cover
 *.log
+# E2E run artifacts (convention CBL-002 section 7).
+test/e2e/.runs/

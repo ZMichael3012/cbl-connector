@@ -1,5 +1,5 @@
-// main запускает HTTP- и gRPC-сервис connector платформы CBL:
-// конвейер нормализации вебхуков провайдера в канонические события.
+// main starts the HTTP and gRPC service of the CBL connector platform:
+// the pipeline that normalizes provider webhooks into canonical events.
 package main
 
 import (
@@ -36,9 +36,9 @@ import (
 	"github.com/cbl/cbl-connector/internal/usecase"
 )
 
-// main поднимает административный HTTP-сервер, gRPC-сервер, relay outbox
-// и консьюмер нормализации вебхуков; завершает работу по SIGINT/SIGTERM.
-// Регистрация ConnectorService появится в задаче 3.2 вместе с адаптером провайдера.
+// main starts the administrative HTTP server, the gRPC server, the outbox relay,
+// and the webhook normalization consumer; it shuts down on SIGINT/SIGTERM.
+// ConnectorService registration will be added in task 3.2 together with the provider adapter.
 func main() {
 	log, err := zap.NewProduction()
 	if err != nil {
@@ -86,9 +86,9 @@ func main() {
 	}
 	normalizer := usecase.NewNormalizer(registry, log)
 
-	// Правила маршрутизации (3.4): источник истины - PostgreSQL; Redis - только
-	// кеш, его отсутствие или сбой не влияет на выбор. Реестр провайдеров и
-	// Router подключаются задачей 3.2 (KI-01).
+	// Routing rules (3.4): PostgreSQL is the source of truth; Redis is only a
+	// cache, and its absence or failure does not affect the selection. The provider
+	// registry and the Router are wired in task 3.2 (KI-01).
 	ruleStore := storage.NewRouteRulesRepository(db)
 	var ruleCache usecase.RouteConfigCacheStore
 	if redisAddr := os.Getenv("REDIS_ADDR"); redisAddr != "" {
@@ -226,7 +226,7 @@ func main() {
 	log.Info("shutdown finished")
 }
 
-// metricsHandler отдает заглушку метрик до задачи 0.7.
+// metricsHandler serves a metrics stub until task 0.7.
 func metricsHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
@@ -236,7 +236,7 @@ func metricsHandler() http.Handler {
 	return mux
 }
 
-// getenv возвращает значение переменной окружения или значение по умолчанию.
+// getenv returns the environment variable value or the fallback value.
 func getenv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -244,7 +244,7 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
-// splitCSV разбирает список значений из переменной окружения через запятую.
+// splitCSV parses a comma-separated list of values from an environment variable.
 func splitCSV(raw string) []string {
 	parts := strings.Split(raw, ",")
 	values := make([]string, 0, len(parts))

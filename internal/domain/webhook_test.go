@@ -13,10 +13,10 @@ import (
 	"github.com/cbl/cbl-connector/internal/domain"
 )
 
-// testPaymentID задает UUID платежа для тестов событий.
+// testPaymentID sets the payment UUID used by the event tests.
 const testPaymentID = "01a138fd-0000-7000-8000-000000000001"
 
-// validEvent собирает корректное каноническое событие.
+// validEvent builds a valid canonical event.
 func validEvent() domain.CanonicalEvent {
 	return domain.CanonicalEvent{
 		Type:           domain.StateConfirmed,
@@ -37,28 +37,28 @@ func TestCanonicalEventValidate(t *testing.T) {
 	require.NoError(t, validEvent().Validate())
 
 	cases := map[string]func(*domain.CanonicalEvent){
-		"пустой payment_id":     func(e *domain.CanonicalEvent) { e.PaymentID = " " },
-		"payment_id не uuid":    func(e *domain.CanonicalEvent) { e.PaymentID = "pay-1" },
-		"пустой gateway_id":     func(e *domain.CanonicalEvent) { e.GatewayID = "" },
-		"длинный gateway_id":    func(e *domain.CanonicalEvent) { e.GatewayID = strings.Repeat("g", 129) },
-		"control-символ":        func(e *domain.CanonicalEvent) { e.GatewayID = "gw\x001" },
-		"пустой provider":       func(e *domain.CanonicalEvent) { e.Provider = "" },
-		"неизвестный тип":       func(e *domain.CanonicalEvent) { e.Type = domain.State("unexpected") },
-		"нулевое время":         func(e *domain.CanonicalEvent) { e.OccurredAt = time.Time{} },
-		"длинный txid":          func(e *domain.CanonicalEvent) { e.TXID = strings.Repeat("t", 257) },
-		"плохой network":        func(e *domain.CanonicalEvent) { e.Network = "trc 20" },
-		"длинный network":       func(e *domain.CanonicalEvent) { e.Network = strings.Repeat("n", 65) },
-		"пустой актив":          func(e *domain.CanonicalEvent) { e.ReceivedAmount.Asset = "" },
-		"короткий актив":        func(e *domain.CanonicalEvent) { e.ReceivedAmount.Asset = "U" },
-		"длинный актив":         func(e *domain.CanonicalEvent) { e.ReceivedAmount.Asset = strings.Repeat("A", 17) },
-		"актив с мусором":       func(e *domain.CanonicalEvent) { e.ReceivedAmount.Asset = "US DT" },
-		"decimals выше предела": func(e *domain.CanonicalEvent) { e.ReceivedAmount.Decimals = 19 },
-		"отрицательная сумма":   func(e *domain.CanonicalEvent) { e.ReceivedAmount.MinorUnits = -1 },
-		"нулевая сумма допустима": func(e *domain.CanonicalEvent) {
+		"empty payment_id":     func(e *domain.CanonicalEvent) { e.PaymentID = " " },
+		"payment_id not uuid":  func(e *domain.CanonicalEvent) { e.PaymentID = "pay-1" },
+		"empty gateway_id":     func(e *domain.CanonicalEvent) { e.GatewayID = "" },
+		"long gateway_id":      func(e *domain.CanonicalEvent) { e.GatewayID = strings.Repeat("g", 129) },
+		"control character":    func(e *domain.CanonicalEvent) { e.GatewayID = "gw\x001" },
+		"empty provider":       func(e *domain.CanonicalEvent) { e.Provider = "" },
+		"unknown type":         func(e *domain.CanonicalEvent) { e.Type = domain.State("unexpected") },
+		"zero time":            func(e *domain.CanonicalEvent) { e.OccurredAt = time.Time{} },
+		"long txid":            func(e *domain.CanonicalEvent) { e.TXID = strings.Repeat("t", 257) },
+		"bad network":          func(e *domain.CanonicalEvent) { e.Network = "trc 20" },
+		"long network":         func(e *domain.CanonicalEvent) { e.Network = strings.Repeat("n", 65) },
+		"empty asset":          func(e *domain.CanonicalEvent) { e.ReceivedAmount.Asset = "" },
+		"short asset":          func(e *domain.CanonicalEvent) { e.ReceivedAmount.Asset = "U" },
+		"long asset":           func(e *domain.CanonicalEvent) { e.ReceivedAmount.Asset = strings.Repeat("A", 17) },
+		"asset with garbage":   func(e *domain.CanonicalEvent) { e.ReceivedAmount.Asset = "US DT" },
+		"decimals above limit": func(e *domain.CanonicalEvent) { e.ReceivedAmount.Decimals = 19 },
+		"negative amount":      func(e *domain.CanonicalEvent) { e.ReceivedAmount.MinorUnits = -1 },
+		"zero amount is allowed": func(e *domain.CanonicalEvent) {
 			e.ReceivedAmount.MinorUnits = 0
 		},
-		"пустой txid допустим": func(e *domain.CanonicalEvent) { e.TXID = "" },
-		"пустая сеть допустима": func(e *domain.CanonicalEvent) {
+		"empty txid is allowed": func(e *domain.CanonicalEvent) { e.TXID = "" },
+		"empty network is allowed": func(e *domain.CanonicalEvent) {
 			e.Network = ""
 		},
 	}
@@ -66,7 +66,7 @@ func TestCanonicalEventValidate(t *testing.T) {
 		event := validEvent()
 		mutate(&event)
 		err := event.Validate()
-		if name == "нулевая сумма допустима" || name == "пустой txid допустим" || name == "пустая сеть допустима" {
+		if name == "zero amount is allowed" || name == "empty txid is allowed" || name == "empty network is allowed" {
 			assert.NoError(t, err, name)
 			continue
 		}

@@ -1,3 +1,3 @@
-// Пакет transport содержит транспортный слой сервиса connector:
-// HTTP-хендлеры Gin и gRPC-обработчики, собранные из usecase.
+// Package transport contains the transport layer of the connector service:
+// Gin HTTP handlers and gRPC handlers wired from usecase.
 package transport

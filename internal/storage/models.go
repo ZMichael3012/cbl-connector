@@ -7,10 +7,10 @@ import (
 	"time"
 )
 
-// StringList сериализует список строк в jsonb.
+// StringList serializes a string list into jsonb.
 type StringList []string
 
-// Value реализует driver.Valuer для jsonb.
+// Value implements driver.Valuer for jsonb.
 func (l StringList) Value() (driver.Value, error) {
 	if l == nil {
 		return []byte("[]"), nil
@@ -22,7 +22,7 @@ func (l StringList) Value() (driver.Value, error) {
 	return raw, nil
 }
 
-// Scan реализует sql.Scanner для jsonb.
+// Scan implements sql.Scanner for jsonb.
 func (l *StringList) Scan(value any) error {
 	if value == nil {
 		*l = nil
@@ -45,31 +45,31 @@ func (l *StringList) Scan(value any) error {
 	return nil
 }
 
-// RouteRuleRow описывает строку таблицы routing_rules.
+// RouteRuleRow describes a routing_rules table row.
 type RouteRuleRow struct {
-	// ID задает UUIDv7 правила.
+	// ID specifies the rule UUIDv7.
 	ID string `gorm:"column:id;type:uuid;primaryKey"`
-	// Provider задает провайдера правила.
+	// Provider specifies the rule provider.
 	Provider string `gorm:"column:provider"`
-	// Operation задает операцию правила; пусто - любая.
+	// Operation specifies the rule operation; empty means any.
 	Operation string `gorm:"column:operation"`
-	// Networks задает сети правила.
+	// Networks specifies the rule networks.
 	Networks StringList `gorm:"column:networks;type:jsonb"`
-	// Assets задает активы правила.
+	// Assets specifies the rule assets.
 	Assets StringList `gorm:"column:assets;type:jsonb"`
-	// Priority задает приоритет: меньшее значение важнее.
+	// Priority specifies the priority: a lower value wins.
 	Priority int `gorm:"column:priority"`
-	// Weight задает вес внутри приоритета.
+	// Weight specifies the weight within the priority.
 	Weight int `gorm:"column:weight"`
-	// MinAmount задает нижнюю границу суммы (0 - без границы).
+	// MinAmount specifies the lower amount bound (0 means no bound).
 	MinAmount int64 `gorm:"column:min_amount"`
-	// MaxAmount задает верхнюю границу суммы (0 - без границы).
+	// MaxAmount specifies the upper amount bound (0 means no bound).
 	MaxAmount int64 `gorm:"column:max_amount"`
-	// Enabled сообщает, что правило активно.
+	// Enabled reports whether the rule is active.
 	Enabled bool `gorm:"column:enabled"`
-	// UpdatedAt задает время последнего изменения правила.
+	// UpdatedAt specifies the last modification time of the rule.
 	UpdatedAt time.Time `gorm:"column:updated_at"`
 }
 
-// TableName задает имя таблицы routing_rules.
+// TableName specifies the routing_rules table name.
 func (RouteRuleRow) TableName() string { return "routing_rules" }

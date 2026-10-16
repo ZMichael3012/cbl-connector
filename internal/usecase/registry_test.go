@@ -13,17 +13,17 @@ import (
 	"github.com/cbl/cbl-connector/internal/usecase"
 )
 
-// fakeDecoder реализует usecase.WebhookDecoder для тестов реестра и нормализатора.
+// fakeDecoder implements usecase.WebhookDecoder for registry and normalizer tests.
 type fakeDecoder struct {
 	provider string
 	event    domain.CanonicalEvent
 	err      error
 }
 
-// Provider возвращает имя провайдера.
+// Provider returns the provider name.
 func (d *fakeDecoder) Provider() string { return d.provider }
 
-// Decode возвращает заранее заданное событие или ошибку.
+// Decode returns the preconfigured event or error.
 func (d *fakeDecoder) Decode(_ context.Context, _ *eventsv1.GatewayWebhookRaw) (domain.CanonicalEvent, error) {
 	if d.err != nil {
 		return domain.CanonicalEvent{}, d.err
@@ -41,7 +41,7 @@ func TestDecoderRegistry(t *testing.T) {
 
 	found, ok := registry.Decoder("mock")
 	require.True(t, ok)
-	assert.Equal(t, first, found, "провайдер ищется без учета регистра")
+	assert.Equal(t, first, found, "the provider is looked up case-insensitively")
 
 	found, ok = registry.Decoder(" other ")
 	require.True(t, ok)
@@ -65,7 +65,7 @@ func TestDecoderRegistryRejectsEmptyProvider(t *testing.T) {
 	require.Error(t, err)
 
 	registry, err := usecase.NewDecoderRegistry()
-	require.NoError(t, err, "пустой реестр допустим")
+	require.NoError(t, err, "an empty registry is allowed")
 	_, ok := registry.Decoder("mock")
 	assert.False(t, ok)
 }

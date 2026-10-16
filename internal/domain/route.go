@@ -6,43 +6,43 @@ import (
 	"strings"
 )
 
-// Операции маршрутизации.
+// Routing operations.
 const (
-	// OperationInvoice задает операцию создания счета.
+	// OperationInvoice sets the invoice creation operation.
 	OperationInvoice = "invoice"
-	// OperationPayout задает операцию выплаты.
+	// OperationPayout sets the payout operation.
 	OperationPayout = "payout"
 )
 
-// RouteRule описывает правило выбора провайдера.
+// RouteRule describes a provider selection rule.
 type RouteRule struct {
-	// Provider задает провайдера правила.
+	// Provider sets the rule provider.
 	Provider string `json:"provider"`
-	// Operation задает операцию правила; пусто - любая.
+	// Operation sets the rule operation; empty means any.
 	Operation string `json:"operation"`
-	// Networks задает сети правила; пусто - любые.
+	// Networks sets the rule networks; empty means any.
 	Networks []string `json:"networks"`
-	// Assets задает активы правила; пусто - любые.
+	// Assets sets the rule assets; empty means any.
 	Assets []string `json:"assets"`
-	// Priority задает приоритет: меньшее значение важнее.
+	// Priority sets the priority: a lower value wins.
 	Priority int `json:"priority"`
-	// Weight задает вес внутри приоритета.
+	// Weight sets the weight within the priority.
 	Weight int `json:"weight"`
-	// MinAmount задает нижнюю границу суммы (0 - без границы).
+	// MinAmount sets the lower amount bound (0 means no bound).
 	MinAmount int64 `json:"min_amount"`
-	// MaxAmount задает верхнюю границу суммы (0 - без границы).
+	// MaxAmount sets the upper amount bound (0 means no bound).
 	MaxAmount int64 `json:"max_amount"`
-	// Enabled сообщает, что правило активно.
+	// Enabled reports whether the rule is active.
 	Enabled bool `json:"enabled"`
 }
 
-// Пределы полей правила: защищают взвешенный выбор от переполнения суммы весов.
+// Rule field limits: they protect the weighted selection from overflow of the weight sum.
 const (
 	maxRulePriority = 1_000_000
 	maxRuleWeight   = 1_000_000
 )
 
-// Validate проверяет корректность правила маршрутизации.
+// Validate checks a routing rule for correctness.
 func (r RouteRule) Validate() error {
 	if !validPrintable(strings.TrimSpace(r.Provider), maxProviderLen) {
 		return fmt.Errorf("%w: invalid provider %q", ErrInvalidRoute, r.Provider)
@@ -77,8 +77,8 @@ func (r RouteRule) Validate() error {
 	return nil
 }
 
-// RouteRulesSource загружает активные правила маршрутизации.
+// RouteRulesSource loads the active routing rules.
 type RouteRulesSource interface {
-	// Load возвращает включенные правила в порядке приоритета.
+	// Load returns the enabled rules ordered by priority.
 	Load(ctx context.Context) ([]RouteRule, error)
 }

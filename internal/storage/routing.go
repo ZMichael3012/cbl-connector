@@ -11,17 +11,17 @@ import (
 	"github.com/cbl/cbl-connector/internal/domain"
 )
 
-// RouteRulesRepository хранит правила маршрутизации в PostgreSQL.
+// RouteRulesRepository stores the routing rules in PostgreSQL.
 type RouteRulesRepository struct {
 	db *gorm.DB
 }
 
-// NewRouteRulesRepository создает репозиторий правил.
+// NewRouteRulesRepository creates the rule repository.
 func NewRouteRulesRepository(db *gorm.DB) *RouteRulesRepository {
 	return &RouteRulesRepository{db: db}
 }
 
-// LoadEnabled возвращает включенные правила в порядке приоритета.
+// LoadEnabled returns the enabled rules ordered by priority.
 func (r *RouteRulesRepository) LoadEnabled(ctx context.Context) ([]domain.RouteRule, error) {
 	var rows []RouteRuleRow
 	err := r.db.WithContext(ctx).
@@ -38,11 +38,11 @@ func (r *RouteRulesRepository) LoadEnabled(ctx context.Context) ([]domain.RouteR
 	return rules, nil
 }
 
-// routeRulesLockKey задает ключ advisory-лока замены конфигурации:
-// сериализует конкурентные Save, чтобы replace-all не оставил объединение двух наборов.
+// routeRulesLockKey specifies the advisory lock key of configuration replacement:
+// it serializes concurrent Saves so that replace-all does not leave a merge of two sets.
 const routeRulesLockKey = int64(0x43424C34524F5554) // "CBL4ROUT"
 
-// Save заменяет конфигурацию правил целиком в одной транзакции.
+// Save replaces the whole rule configuration in a single transaction.
 func (r *RouteRulesRepository) Save(ctx context.Context, rules []domain.RouteRule) error {
 	rows := make([]RouteRuleRow, 0, len(rules))
 	now := time.Now().UTC()
@@ -86,7 +86,7 @@ func (r *RouteRulesRepository) Save(ctx context.Context, rules []domain.RouteRul
 	})
 }
 
-// toDomainRule переводит строку таблицы в доменное правило.
+// toDomainRule converts a table row into a domain rule.
 func toDomainRule(row *RouteRuleRow) domain.RouteRule {
 	return domain.RouteRule{
 		Provider:  row.Provider,

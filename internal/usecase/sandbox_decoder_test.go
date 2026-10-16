@@ -16,10 +16,10 @@ import (
 	"github.com/cbl/cbl-connector/internal/usecase"
 )
 
-// sandboxPaymentID задает UUID платежа для тел sandbox-вебхуков.
+// sandboxPaymentID specifies the payment UUID for sandbox webhook bodies.
 const sandboxPaymentID = "01a138fd-0000-7000-8000-000000000002"
 
-// rawWebhook собирает сырой вебхук sandbox-провайдера.
+// rawWebhook builds a raw sandbox provider webhook.
 func rawWebhook(body string) *eventsv1.GatewayWebhookRaw {
 	return &eventsv1.GatewayWebhookRaw{
 		Provider:          "mock",
@@ -90,18 +90,18 @@ func TestSandboxDecoderRejections(t *testing.T) {
 
 	decoder := newSandboxDecoder(t)
 	cases := map[string]string{
-		"битый json":            `{not-json`,
-		"пустой payment_id":     `{"payment_id":" ","gateway_id":"g","status":"confirmed","received_amount":{"minor_units":1,"asset":"USDT","decimals":2},"event_ts":"2026-10-14T12:00:00Z"}`,
-		"пустой gateway_id":     `{"payment_id":"` + sandboxPaymentID + `","gateway_id":"","status":"confirmed","received_amount":{"minor_units":1,"asset":"USDT","decimals":2},"event_ts":"2026-10-14T12:00:00Z"}`,
-		"нет received_amount":   `{"payment_id":"` + sandboxPaymentID + `","gateway_id":"g","status":"confirmed","event_ts":"2026-10-14T12:00:00Z"}`,
-		"нет event_ts":          `{"payment_id":"` + sandboxPaymentID + `","gateway_id":"g","status":"confirmed","received_amount":{"minor_units":1,"asset":"USDT","decimals":2}}`,
-		"битый event_ts":        `{"payment_id":"` + sandboxPaymentID + `","gateway_id":"g","status":"confirmed","received_amount":{"minor_units":1,"asset":"USDT","decimals":2},"event_ts":"yesterday"}`,
-		"пустой status":         `{"payment_id":"` + sandboxPaymentID + `","gateway_id":"g","status":" ","received_amount":{"minor_units":1,"asset":"USDT","decimals":2},"event_ts":"2026-10-14T12:00:00Z"}`,
-		"длинный status":        `{"payment_id":"` + sandboxPaymentID + `","gateway_id":"g","status":"` + strings.Repeat("s", 33) + `","received_amount":{"minor_units":1,"asset":"USDT","decimals":2},"event_ts":"2026-10-14T12:00:00Z"}`,
-		"длинный event_ts":      `{"payment_id":"` + sandboxPaymentID + `","gateway_id":"g","status":"confirmed","received_amount":{"minor_units":1,"asset":"USDT","decimals":2},"event_ts":"` + strings.Repeat("2", 65) + `"}`,
-		"отрицательная сумма":   `{"payment_id":"` + sandboxPaymentID + `","gateway_id":"g","status":"confirmed","received_amount":{"minor_units":-5,"asset":"USDT","decimals":2},"event_ts":"2026-10-14T12:00:00Z"}`,
-		"пустой актив":          `{"payment_id":"` + sandboxPaymentID + `","gateway_id":"g","status":"confirmed","received_amount":{"minor_units":1,"asset":"","decimals":2},"event_ts":"2026-10-14T12:00:00Z"}`,
-		"decimals выше предела": `{"payment_id":"` + sandboxPaymentID + `","gateway_id":"g","status":"confirmed","received_amount":{"minor_units":1,"asset":"USDT","decimals":30},"event_ts":"2026-10-14T12:00:00Z"}`,
+		"broken json":              `{not-json`,
+		"empty payment_id":         `{"payment_id":" ","gateway_id":"g","status":"confirmed","received_amount":{"minor_units":1,"asset":"USDT","decimals":2},"event_ts":"2026-10-14T12:00:00Z"}`,
+		"empty gateway_id":         `{"payment_id":"` + sandboxPaymentID + `","gateway_id":"","status":"confirmed","received_amount":{"minor_units":1,"asset":"USDT","decimals":2},"event_ts":"2026-10-14T12:00:00Z"}`,
+		"missing received_amount":  `{"payment_id":"` + sandboxPaymentID + `","gateway_id":"g","status":"confirmed","event_ts":"2026-10-14T12:00:00Z"}`,
+		"missing event_ts":         `{"payment_id":"` + sandboxPaymentID + `","gateway_id":"g","status":"confirmed","received_amount":{"minor_units":1,"asset":"USDT","decimals":2}}`,
+		"broken event_ts":          `{"payment_id":"` + sandboxPaymentID + `","gateway_id":"g","status":"confirmed","received_amount":{"minor_units":1,"asset":"USDT","decimals":2},"event_ts":"yesterday"}`,
+		"empty status":             `{"payment_id":"` + sandboxPaymentID + `","gateway_id":"g","status":" ","received_amount":{"minor_units":1,"asset":"USDT","decimals":2},"event_ts":"2026-10-14T12:00:00Z"}`,
+		"long status":              `{"payment_id":"` + sandboxPaymentID + `","gateway_id":"g","status":"` + strings.Repeat("s", 33) + `","received_amount":{"minor_units":1,"asset":"USDT","decimals":2},"event_ts":"2026-10-14T12:00:00Z"}`,
+		"long event_ts":            `{"payment_id":"` + sandboxPaymentID + `","gateway_id":"g","status":"confirmed","received_amount":{"minor_units":1,"asset":"USDT","decimals":2},"event_ts":"` + strings.Repeat("2", 65) + `"}`,
+		"negative amount":          `{"payment_id":"` + sandboxPaymentID + `","gateway_id":"g","status":"confirmed","received_amount":{"minor_units":-5,"asset":"USDT","decimals":2},"event_ts":"2026-10-14T12:00:00Z"}`,
+		"empty asset":              `{"payment_id":"` + sandboxPaymentID + `","gateway_id":"g","status":"confirmed","received_amount":{"minor_units":1,"asset":"","decimals":2},"event_ts":"2026-10-14T12:00:00Z"}`,
+		"decimals above the limit": `{"payment_id":"` + sandboxPaymentID + `","gateway_id":"g","status":"confirmed","received_amount":{"minor_units":1,"asset":"USDT","decimals":30},"event_ts":"2026-10-14T12:00:00Z"}`,
 	}
 	for name, body := range cases {
 		_, err := decoder.Decode(context.Background(), rawWebhook(body))
@@ -122,12 +122,12 @@ func TestSandboxDecoderRejectsHugeInput(t *testing.T) {
 		strings.Repeat("2", 300*(1<<10)) + `"}`
 	_, err := decoder.Decode(context.Background(), rawWebhook(huge))
 	require.ErrorIs(t, err, domain.ErrInvalidWebhook)
-	assert.Less(t, len(err.Error()), 200, "гигантский вход не попадает в текст ошибки")
+	assert.Less(t, len(err.Error()), 200, "the giant input does not leak into the error text")
 
 	bigBody := `{"padding":"` + strings.Repeat("p", 300*(1<<10)) + `"}`
 	_, err = decoder.Decode(context.Background(), rawWebhook(bigBody))
 	require.ErrorIs(t, err, domain.ErrInvalidWebhook)
-	assert.Less(t, len(err.Error()), 200, "превышение размера тела отсекается до парсинга")
+	assert.Less(t, len(err.Error()), 200, "an oversized body is cut off before parsing")
 }
 
 func TestSandboxDecoderEmptyProvider(t *testing.T) {

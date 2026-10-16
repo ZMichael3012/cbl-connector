@@ -1,5 +1,5 @@
-// Пакет domain содержит модель внешнего крипто-шлюза и каноническую модель
-// статусов и событий, к которой приводятся все адаптеры провайдеров.
+// Package domain contains the external crypto gateway model and the canonical
+// model of statuses and events that all provider adapters normalize to.
 package domain
 
 import (
@@ -13,39 +13,39 @@ import (
 	"github.com/cbl/cbl-kit/money"
 )
 
-// State описывает канонический статус платежа у провайдера.
+// State describes the canonical payment status at the provider.
 type State string
 
-// Канонические статусы платежа.
+// Canonical payment statuses.
 const (
-	// StateDetected описывает обнаружение оплаты.
+	// StateDetected describes detection of a payment.
 	StateDetected State = "detected"
-	// StateConfirmed описывает финальное подтверждение оплаты.
+	// StateConfirmed describes final confirmation of a payment.
 	StateConfirmed State = "confirmed"
-	// StateFailed описывает неуспешную оплату.
+	// StateFailed describes an unsuccessful payment.
 	StateFailed State = "failed"
-	// StateExpired описывает истечение счета.
+	// StateExpired describes invoice expiration.
 	StateExpired State = "expired"
-	// StateUnderpaid описывает недоплату.
+	// StateUnderpaid describes an underpayment.
 	StateUnderpaid State = "underpaid"
-	// StateOverpaid описывает переплату.
+	// StateOverpaid describes an overpayment.
 	StateOverpaid State = "overpaid"
 )
 
-// PayoutState описывает канонический статус выплаты у провайдера.
+// PayoutState describes the canonical payout status at the provider.
 type PayoutState string
 
-// Канонические статусы выплаты.
+// Canonical payout statuses.
 const (
-	// PayoutSubmitted описывает отправку выплаты провайдеру.
+	// PayoutSubmitted describes submission of a payout to the provider.
 	PayoutSubmitted PayoutState = "submitted"
-	// PayoutConfirmed описывает подтверждение выплаты.
+	// PayoutConfirmed describes payout confirmation.
 	PayoutConfirmed PayoutState = "confirmed"
-	// PayoutFailed описывает отказ выплаты.
+	// PayoutFailed describes payout failure.
 	PayoutFailed PayoutState = "failed"
 )
 
-// paymentStateAliases сопоставляет провайдерские строки каноническим статусам платежа.
+// paymentStateAliases maps provider strings to canonical payment statuses.
 var paymentStateAliases = map[string]State{
 	"detected":  StateDetected,
 	"pending":   StateDetected,
@@ -60,7 +60,7 @@ var paymentStateAliases = map[string]State{
 	"overpaid":  StateOverpaid,
 }
 
-// payoutStateAliases сопоставляет провайдерские строки каноническим статусам выплаты.
+// payoutStateAliases maps provider strings to canonical payout statuses.
 var payoutStateAliases = map[string]PayoutState{
 	"submitted": PayoutSubmitted,
 	"pending":   PayoutSubmitted,
@@ -71,7 +71,7 @@ var payoutStateAliases = map[string]PayoutState{
 	"rejected":  PayoutFailed,
 }
 
-// CanonicalState переводит строку провайдера в канонический статус платежа.
+// CanonicalState converts a provider string into a canonical payment status.
 func CanonicalState(raw string) (State, error) {
 	state, ok := paymentStateAliases[strings.ToLower(strings.TrimSpace(raw))]
 	if !ok {
@@ -80,7 +80,7 @@ func CanonicalState(raw string) (State, error) {
 	return state, nil
 }
 
-// CanonicalPayoutState переводит строку провайдера в канонический статус выплаты.
+// CanonicalPayoutState converts a provider string into a canonical payout status.
 func CanonicalPayoutState(raw string) (PayoutState, error) {
 	state, ok := payoutStateAliases[strings.ToLower(strings.TrimSpace(raw))]
 	if !ok {
@@ -89,82 +89,82 @@ func CanonicalPayoutState(raw string) (PayoutState, error) {
 	return state, nil
 }
 
-// Invoice описывает счет, созданный во внешнем шлюзе.
+// Invoice describes an invoice created in the external gateway.
 type Invoice struct {
-	// GatewayID задает идентификатор счета у провайдера.
+	// GatewayID sets the invoice identifier at the provider.
 	GatewayID string
-	// Provider задает имя провайдера.
+	// Provider sets the provider name.
 	Provider string
-	// Address задает адрес оплаты.
+	// Address sets the payment address.
 	Address string
-	// Network задает сеть оплаты.
+	// Network sets the payment network.
 	Network string
-	// Amount задает ожидаемую сумму.
+	// Amount sets the expected amount.
 	Amount money.Money
-	// ExpiresAt задает срок действия счета.
+	// ExpiresAt sets the invoice expiration time.
 	ExpiresAt time.Time
 }
 
-// CreateInvoiceRequest описывает запрос создания счета.
+// CreateInvoiceRequest describes an invoice creation request.
 type CreateInvoiceRequest struct {
-	// IdempotencyKey задает ключ идемпотентности вызова.
+	// IdempotencyKey sets the call idempotency key.
 	IdempotencyKey string
-	// PaymentID задает платеж платформы.
+	// PaymentID sets the platform payment.
 	PaymentID string
-	// Amount задает сумму счета.
+	// Amount sets the invoice amount.
 	Amount money.Money
-	// Network задает сеть оплаты.
+	// Network sets the payment network.
 	Network string
-	// ExpiresAt задает срок действия счета.
+	// ExpiresAt sets the invoice expiration time.
 	ExpiresAt time.Time
 }
 
-// PaymentStatus описывает канонический статус платежа у провайдера.
+// PaymentStatus describes the canonical payment status at the provider.
 type PaymentStatus struct {
-	// GatewayID задает идентификатор платежа у провайдера.
+	// GatewayID sets the payment identifier at the provider.
 	GatewayID string
-	// PaymentID задает платеж платформы.
+	// PaymentID sets the platform payment.
 	PaymentID string
-	// Provider задает имя провайдера.
+	// Provider sets the provider name.
 	Provider string
-	// State задает канонический статус.
+	// State sets the canonical status.
 	State State
-	// ReceivedAmount задает полученную сумму.
+	// ReceivedAmount sets the received amount.
 	ReceivedAmount money.Money
-	// Confirmations задает глубину подтверждений.
+	// Confirmations sets the confirmation depth.
 	Confirmations uint32
-	// TXID задает хеш транзакции.
+	// TXID sets the transaction hash.
 	TXID string
-	// Network задает сеть.
+	// Network sets the network.
 	Network string
-	// GatewayEventTS задает время события у провайдера.
+	// GatewayEventTS sets the event time at the provider.
 	GatewayEventTS time.Time
 }
 
-// CanonicalEvent описывает нормализованное событие провайдера.
+// CanonicalEvent describes a normalized provider event.
 type CanonicalEvent struct {
-	// Type задает канонический тип события.
+	// Type sets the canonical event type.
 	Type State
-	// PaymentID задает платеж платформы.
+	// PaymentID sets the platform payment.
 	PaymentID string
-	// GatewayID задает идентификатор у провайдера.
+	// GatewayID sets the identifier at the provider.
 	GatewayID string
-	// Provider задает имя провайдера.
+	// Provider sets the provider name.
 	Provider string
-	// TXID задает хеш транзакции.
+	// TXID sets the transaction hash.
 	TXID string
-	// Network задает сеть.
+	// Network sets the network.
 	Network string
-	// ReceivedAmount задает полученную сумму.
+	// ReceivedAmount sets the received amount.
 	ReceivedAmount money.Money
-	// Confirmations задает глубину подтверждений.
+	// Confirmations sets the confirmation depth.
 	Confirmations uint32
-	// OccurredAt задает время события.
+	// OccurredAt sets the event time.
 	OccurredAt time.Time
 }
 
-// Ограничения полей канонического события: недоверенный вход не должен
-// раздувать ключи Kafka, конверт outbox и сообщения retry/DLQ (review 3.5).
+// Canonical event field limits: untrusted input must not inflate Kafka keys,
+// the outbox envelope, or retry/DLQ messages (review 3.5).
 const (
 	maxGatewayIDLen = 128
 	maxTXIDLen      = 256
@@ -174,7 +174,7 @@ const (
 	maxAssetLen     = 16
 )
 
-// Validate проверяет обязательные поля канонического события перед публикацией.
+// Validate checks the mandatory fields of the canonical event before publication.
 func (e CanonicalEvent) Validate() error {
 	if _, err := uuid.Parse(strings.TrimSpace(e.PaymentID)); err != nil {
 		return fmt.Errorf("%w: payment_id must be uuid", ErrInvalidWebhook)
@@ -211,7 +211,7 @@ func (e CanonicalEvent) Validate() error {
 	return nil
 }
 
-// validPrintable проверяет непустое значение с видимыми ASCII-символами в пределах длины.
+// validPrintable checks a non-empty value with printable ASCII characters within the length limit.
 func validPrintable(value string, maxLen int) bool {
 	if value == "" || len(value) > maxLen {
 		return false
@@ -224,7 +224,7 @@ func validPrintable(value string, maxLen int) bool {
 	return true
 }
 
-// validCode проверяет код (актив, сеть): латиница, цифры, дефис и подчеркивание.
+// validCode checks a code (asset, network): Latin letters, digits, hyphen, and underscore.
 func validCode(value string, maxLen int) bool {
 	if value == "" || len(value) > maxLen {
 		return false
@@ -240,92 +240,92 @@ func validCode(value string, maxLen int) bool {
 	return true
 }
 
-// PayoutRequest описывает запрос выплаты провайдеру.
+// PayoutRequest describes a payout request to the provider.
 type PayoutRequest struct {
-	// IdempotencyKey задает ключ идемпотентности вызова.
+	// IdempotencyKey sets the call idempotency key.
 	IdempotencyKey string
-	// PayoutID задает выплату платформы.
+	// PayoutID sets the platform payout.
 	PayoutID string
-	// Amount задает сумму выплаты.
+	// Amount sets the payout amount.
 	Amount money.Money
-	// Network задает сеть выплаты.
+	// Network sets the payout network.
 	Network string
-	// Address задает адрес получателя.
+	// Address sets the recipient address.
 	Address string
 }
 
-// Payout описывает выплату, созданную у провайдера.
+// Payout describes a payout created at the provider.
 type Payout struct {
-	// GatewayPayoutID задает идентификатор выплаты у провайдера.
+	// GatewayPayoutID sets the payout identifier at the provider.
 	GatewayPayoutID string
-	// Provider задает имя провайдера.
+	// Provider sets the provider name.
 	Provider string
-	// State задает канонический статус.
+	// State sets the canonical status.
 	State PayoutState
 }
 
-// PayoutStatus описывает канонический статус выплаты.
+// PayoutStatus describes the canonical payout status.
 type PayoutStatus struct {
-	// State задает канонический статус.
+	// State sets the canonical status.
 	State PayoutState
-	// TXID задает хеш транзакции.
+	// TXID sets the transaction hash.
 	TXID string
-	// Fee задает комиссию провайдера.
+	// Fee sets the provider fee.
 	Fee money.Money
-	// Reason задает причину отказа.
+	// Reason sets the failure reason.
 	Reason string
 }
 
-// NetworkCapability описывает возможности провайдера по сети.
+// NetworkCapability describes the provider capabilities for a network.
 type NetworkCapability struct {
-	// Asset задает поддерживаемый актив.
+	// Asset sets the supported asset.
 	Asset string
-	// MinAmount задает минимальную сумму.
+	// MinAmount sets the minimum amount.
 	MinAmount money.Money
-	// MaxAmount задает максимальную сумму (0 - без лимита).
+	// MaxAmount sets the maximum amount (0 means no limit).
 	MaxAmount money.Money
-	// ConfirmationDepth задает глубину подтверждений.
+	// ConfirmationDepth sets the confirmation depth.
 	ConfirmationDepth uint32
 }
 
-// Capabilities описывает возможности провайдера.
+// Capabilities describes the provider capabilities.
 type Capabilities struct {
-	// Provider задает имя провайдера.
+	// Provider sets the provider name.
 	Provider string
-	// Networks задает возможности по сетям.
+	// Networks sets the capabilities per network.
 	Networks map[string]NetworkCapability
 }
 
-// PaymentGateway описывает порт внешнего крипто-шлюза.
+// PaymentGateway describes the external crypto gateway port.
 type PaymentGateway interface {
-	// CreateInvoice создает счет во внешнем шлюзе.
+	// CreateInvoice creates an invoice in the external gateway.
 	CreateInvoice(ctx context.Context, req CreateInvoiceRequest) (Invoice, error)
-	// GetPayment возвращает канонический статус платежа.
+	// GetPayment returns the canonical payment status.
 	GetPayment(ctx context.Context, gatewayID string) (PaymentStatus, error)
-	// VerifyWebhook проверяет подпись вебхука по сырому телу и разбирает событие.
+	// VerifyWebhook verifies the webhook signature over the raw body and parses the event.
 	VerifyWebhook(headers map[string][]string, rawBody []byte) (CanonicalEvent, error)
-	// CreatePayout создает выплату во внешнем шлюзе.
+	// CreatePayout creates a payout in the external gateway.
 	CreatePayout(ctx context.Context, req PayoutRequest) (Payout, error)
-	// GetPayout возвращает канонический статус выплаты.
+	// GetPayout returns the canonical payout status.
 	GetPayout(ctx context.Context, gatewayPayoutID string) (PayoutStatus, error)
-	// Capabilities возвращает возможности провайдера.
+	// Capabilities returns the provider capabilities.
 	Capabilities() Capabilities
 }
 
-// RouteRequest описывает запрос выбора провайдера.
+// RouteRequest describes a provider selection request.
 type RouteRequest struct {
-	// Network задает сеть операции.
+	// Network sets the operation network.
 	Network string
-	// Asset задает актив операции.
+	// Asset sets the operation asset.
 	Asset string
-	// Amount задает сумму операции.
+	// Amount sets the operation amount.
 	Amount money.Money
-	// Operation задает тип операции (invoice, payout).
+	// Operation sets the operation type (invoice, payout).
 	Operation string
 }
 
-// Validate проверяет обязательные поля запроса маршрутизации:
-// операцию, сеть, актив и положительную сумму того же актива.
+// Validate checks the mandatory fields of the routing request:
+// the operation, network, asset, and a positive amount in the same asset.
 func (r RouteRequest) Validate() error {
 	if strings.TrimSpace(r.Network) == "" {
 		return fmt.Errorf("%w: empty network", ErrInvalidRoute)
@@ -345,8 +345,8 @@ func (r RouteRequest) Validate() error {
 	return nil
 }
 
-// Router выбирает провайдера по правилам маршрутизации.
+// Router selects a provider according to the routing rules.
 type Router interface {
-	// Select возвращает шлюз для запроса.
+	// Select returns the gateway for the request.
 	Select(ctx context.Context, req RouteRequest) (PaymentGateway, error)
 }

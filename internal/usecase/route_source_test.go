@@ -13,7 +13,7 @@ import (
 	"github.com/cbl/cbl-connector/internal/usecase"
 )
 
-// fakeRouteStore подменяет репозиторий правил.
+// fakeRouteStore substitutes the rule repository.
 type fakeRouteStore struct {
 	rules     []domain.RouteRule
 	loadErr   error
@@ -22,7 +22,7 @@ type fakeRouteStore struct {
 	saved     []domain.RouteRule
 }
 
-// LoadEnabled возвращает подготовленные правила.
+// LoadEnabled returns the prepared rules.
 func (s *fakeRouteStore) LoadEnabled(context.Context) ([]domain.RouteRule, error) {
 	if s.loadErr != nil {
 		return nil, s.loadErr
@@ -30,7 +30,7 @@ func (s *fakeRouteStore) LoadEnabled(context.Context) ([]domain.RouteRule, error
 	return s.rules, nil
 }
 
-// Save фиксирует замену правил.
+// Save records the rule replacement.
 func (s *fakeRouteStore) Save(_ context.Context, rules []domain.RouteRule) error {
 	s.saveCalls++
 	if s.saveErr != nil {
@@ -41,7 +41,7 @@ func (s *fakeRouteStore) Save(_ context.Context, rules []domain.RouteRule) error
 	return nil
 }
 
-// fakeRouteCache подменяет Redis-кеш.
+// fakeRouteCache substitutes the Redis cache.
 type fakeRouteCache struct {
 	rules           []domain.RouteRule
 	present         bool
@@ -53,7 +53,7 @@ type fakeRouteCache struct {
 	lastTTL         time.Duration
 }
 
-// Get возвращает подготовленное значение кеша.
+// Get returns the prepared cache value.
 func (c *fakeRouteCache) Get(context.Context) ([]domain.RouteRule, bool, error) {
 	if c.getErr != nil {
 		return nil, false, c.getErr
@@ -61,7 +61,7 @@ func (c *fakeRouteCache) Get(context.Context) ([]domain.RouteRule, bool, error) 
 	return c.rules, c.present, nil
 }
 
-// Set фиксирует запись конфигурации.
+// Set records the configuration write.
 func (c *fakeRouteCache) Set(_ context.Context, rules []domain.RouteRule, ttl time.Duration) error {
 	c.setCalls++
 	c.lastTTL = ttl
@@ -73,7 +73,7 @@ func (c *fakeRouteCache) Set(_ context.Context, rules []domain.RouteRule, ttl ti
 	return nil
 }
 
-// Invalidate фиксирует инвалидацию.
+// Invalidate records the invalidation.
 func (c *fakeRouteCache) Invalidate(context.Context) error {
 	c.invalidateCalls++
 	c.present = false
@@ -88,9 +88,9 @@ func TestNormalizeRouteCacheTTL(t *testing.T) {
 	t.Parallel()
 
 	assert.Equal(t, 30*time.Second, usecase.NormalizeRouteCacheTTL(0))
-	assert.Equal(t, 30*time.Second, usecase.NormalizeRouteCacheTTL(500*time.Millisecond), "ниже системного минимума")
+	assert.Equal(t, 30*time.Second, usecase.NormalizeRouteCacheTTL(500*time.Millisecond), "below the system minimum")
 	assert.Equal(t, 45*time.Second, usecase.NormalizeRouteCacheTTL(45*time.Second))
-	assert.Equal(t, time.Minute, usecase.NormalizeRouteCacheTTL(time.Hour), "выше системного максимума")
+	assert.Equal(t, time.Minute, usecase.NormalizeRouteCacheTTL(time.Hour), "above the system maximum")
 }
 
 func TestRouteCacheTTLFromEnv(t *testing.T) {
@@ -129,15 +129,15 @@ func TestCachedRouteRulesLoadHitSkipsStore(t *testing.T) {
 	source := usecase.NewCachedRouteRules(store, cache, 0, nil)
 
 	rules, err := source.Load(context.Background())
-	require.NoError(t, err, "попадание в кеш не обращается к БД")
+	require.NoError(t, err, "a cache hit does not touch the database")
 	assert.Equal(t, sampleRules(), rules)
 }
 
 func TestCachedRouteRulesRejectsInvalidCachePayload(t *testing.T) {
 	t.Parallel()
 
-	// Семантически испорченный кеш (вес 0) - промах: правила берутся из БД,
-	// иначе роутер получил бы нулевую сумму весов.
+	// A semantically poisoned cache (weight 0) is a miss: the rules come from the database,
+	// otherwise the router would get a zero weight sum.
 	poisoned := []domain.RouteRule{{Provider: "sandbox", Priority: 0, Weight: 0, Enabled: true}}
 	store := &fakeRouteStore{rules: sampleRules()}
 	cache := &fakeRouteCache{rules: poisoned, present: true}
@@ -145,8 +145,8 @@ func TestCachedRouteRulesRejectsInvalidCachePayload(t *testing.T) {
 
 	rules, err := source.Load(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, sampleRules(), rules, "испорченный кеш перекрыт данными хранилища")
-	assert.Equal(t, 1, cache.setCalls, "правильный payload прогрет в кеш")
+	assert.Equal(t, sampleRules(), rules, "the poisoned cache is overridden by storage data")
+	assert.Equal(t, 1, cache.setCalls, "the valid payload is warmed into the cache")
 }
 
 func TestCachedRouteRulesRejectsInvalidStorageRules(t *testing.T) {
@@ -156,7 +156,7 @@ func TestCachedRouteRulesRejectsInvalidStorageRules(t *testing.T) {
 	source := usecase.NewCachedRouteRules(store, &fakeRouteCache{}, 0, nil)
 
 	_, err := source.Load(context.Background())
-	require.Error(t, err, "порча источника истины не должна доходить до роутера")
+	require.Error(t, err, "corruption of the source of truth must not reach the router")
 }
 
 func TestCachedRouteRulesCacheErrorsFallback(t *testing.T) {
@@ -167,9 +167,9 @@ func TestCachedRouteRulesCacheErrorsFallback(t *testing.T) {
 	source := usecase.NewCachedRouteRules(store, cache, 0, nil)
 
 	rules, err := source.Load(context.Background())
-	require.NoError(t, err, "сбой Redis не ломает выбор")
+	require.NoError(t, err, "a Redis failure does not break selection")
 	assert.Equal(t, sampleRules(), rules)
-	assert.Equal(t, 1, cache.setCalls, "попытка прогреть кеш совершается")
+	assert.Equal(t, 1, cache.setCalls, "a cache warm-up attempt is made")
 }
 
 func TestCachedRouteRulesStoreError(t *testing.T) {
@@ -193,9 +193,9 @@ func TestCachedRouteRulesSaveInvalidatesCache(t *testing.T) {
 	require.NoError(t, source.Save(context.Background(), rules))
 	assert.Equal(t, 1, store.saveCalls)
 	assert.Equal(t, 1, cache.invalidateCalls)
-	assert.False(t, cache.present, "кеш инвалидирован")
+	assert.False(t, cache.present, "the cache is invalidated")
 
 	_, err := source.Load(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, 1, cache.setCalls, "после инвалидации кеш прогрет заново")
+	assert.Equal(t, 1, cache.setCalls, "after invalidation the cache is warmed again")
 }

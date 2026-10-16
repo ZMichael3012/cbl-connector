@@ -1,4 +1,4 @@
-.PHONY: build test test-integration test-e2e smoke vet lint fmt vuln up down
+.PHONY: build test test-integration test-e2e vet lint fmt vuln up down
 
 build:
 	go build ./...
@@ -9,18 +9,19 @@ test:
 test-integration:
 	go test -tags integration -count=1 ./internal/...
 
-# test-e2e запускает сквозной сценарий нормализатора на testcontainers Kafka+PostgreSQL.
+# test-e2e runs the normalizer end-to-end scenario on testcontainers Kafka+PostgreSQL.
 test-e2e:
 	go test -tags e2e -count=1 ./test/e2e/
 
-# smoke поднимает compose-стенд и проверяет запуск конвейера нормализации.
-smoke:
-	powershell -NoProfile -File test/e2e/smoke.ps1
+# E2E: compose stand smoke runs follow the test/e2e/E2E.md instruction
+# (scenario E2E_Connector_Smoke; artifacts go to test/e2e/.runs/<UTC mark>/);
+# there are no PowerShell run scripts.
 
 vet:
 	go vet ./...
 
-# lint монтирует каталог services/ целиком: replace на ../cbl-kit резолвится в контейнере.
+# lint mounts the whole services/ directory: the replace directive to ../cbl-kit
+# resolves inside the container.
 lint:
 	docker run --rm -v "$(CURDIR)/..":/src -w /src/$(notdir $(CURDIR)) golangci/golangci-lint:latest-alpine golangci-lint run ./...
 

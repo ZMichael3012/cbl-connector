@@ -1,6 +1,6 @@
 -- +goose Up
--- Правила маршрутизации провайдеров: источник истины connector (3.4).
--- Redis route:config - только кеш с TTL и фолбэком на эту таблицу.
+-- Provider routing rules: the connector is the source of truth (3.4).
+-- Redis route:config is only a cache with a TTL and a fallback to this table.
 CREATE TABLE routing_rules (
     id         uuid PRIMARY KEY,
     provider   text NOT NULL,

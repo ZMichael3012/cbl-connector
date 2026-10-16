@@ -15,43 +15,43 @@ import (
 	"github.com/cbl/cbl-connector/internal/domain"
 )
 
-// sandboxWebhook описывает JSON-тело вебхука sandbox-провайдера (контракт CBL-3.5).
+// sandboxWebhook describes the JSON body of a sandbox provider webhook (contract CBL-3.5).
 type sandboxWebhook struct {
-	// PaymentID задает платеж платформы.
+	// PaymentID specifies the platform payment.
 	PaymentID string `json:"payment_id"`
-	// GatewayID задает идентификатор счета у провайдера.
+	// GatewayID specifies the invoice identifier at the provider.
 	GatewayID string `json:"gateway_id"`
-	// Status задает провайдерский статус из таблицы псевдонимов 3.1.
+	// Status specifies the provider status from the alias table of 3.1.
 	Status string `json:"status"`
-	// ReceivedAmount задает полученную сумму.
+	// ReceivedAmount specifies the received amount.
 	ReceivedAmount *sandboxAmount `json:"received_amount"`
-	// Confirmations задает глубину подтверждений.
+	// Confirmations specifies the confirmation depth.
 	Confirmations uint32 `json:"confirmations"`
-	// TXID задает хеш транзакции.
+	// TXID specifies the transaction hash.
 	TXID string `json:"txid"`
-	// Network задает сеть оплаты.
+	// Network specifies the payment network.
 	Network string `json:"network"`
-	// EventTS задает время события у провайдера в RFC 3339.
+	// EventTS specifies the provider event time in RFC 3339.
 	EventTS string `json:"event_ts"`
 }
 
-// sandboxAmount описывает сумму в минимальных единицах.
+// sandboxAmount describes the amount in minor units.
 type sandboxAmount struct {
-	// MinorUnits задает сумму в минимальных единицах актива.
+	// MinorUnits specifies the amount in the asset minor units.
 	MinorUnits int64 `json:"minor_units"`
-	// Asset задает код актива.
+	// Asset specifies the asset code.
 	Asset string `json:"asset"`
-	// Decimals задает количество знаков после точки.
+	// Decimals specifies the number of decimal places.
 	Decimals uint32 `json:"decimals"`
 }
 
-// SandboxDecoder декодирует вебхуки sandbox-провайдера (mock-gateway, 3.6)
-// до выбора реального провайдера (KI-01).
+// SandboxDecoder decodes webhooks of the sandbox provider (mock-gateway, 3.6)
+// until a real provider is chosen (KI-01).
 type SandboxDecoder struct {
 	provider string
 }
 
-// NewSandboxDecoder создает декодер для провайдера; имя сохраняется в нижнем регистре.
+// NewSandboxDecoder creates a decoder for the provider; the name is stored in lower case.
 func NewSandboxDecoder(provider string) (*SandboxDecoder, error) {
 	trimmed := strings.ToLower(strings.TrimSpace(provider))
 	if trimmed == "" {
@@ -60,19 +60,19 @@ func NewSandboxDecoder(provider string) (*SandboxDecoder, error) {
 	return &SandboxDecoder{provider: trimmed}, nil
 }
 
-// Provider возвращает имя провайдера декодера.
+// Provider returns the decoder provider name.
 func (d *SandboxDecoder) Provider() string { return d.provider }
 
-// Ограничения недоверенного входа sandbox-вебхука: превышение отсекается
-// до парсинга, чтобы сообщения retry/DLQ и логи оставались ограниченными.
+// Limits of the untrusted sandbox webhook input: an excess is cut off
+// before parsing so that retry/DLQ messages and logs stay bounded.
 const (
 	maxWebhookBodyBytes = 256 << 10
 	maxStatusLen        = 32
 	maxEventTSLen       = 64
 )
 
-// Decode разбирает JSON-тело sandbox-вебхука; неизвестные поля игнорируются
-// для обратной совместимости при добавлении полей провайдером.
+// Decode parses the JSON body of a sandbox webhook; unknown fields are ignored
+// for backward compatibility when the provider adds fields.
 func (d *SandboxDecoder) Decode(_ context.Context, raw *eventsv1.GatewayWebhookRaw) (domain.CanonicalEvent, error) {
 	if raw == nil {
 		return domain.CanonicalEvent{}, fmt.Errorf("%w: nil webhook", domain.ErrInvalidWebhook)
@@ -116,7 +116,7 @@ func (d *SandboxDecoder) Decode(_ context.Context, raw *eventsv1.GatewayWebhookR
 	}
 	occurredAt, err := time.Parse(time.RFC3339Nano, eventTS)
 	if err != nil {
-		// Текст ошибки time.Parse содержит входное значение: наружу идет общая ошибка.
+		// The time.Parse error text contains the input value: a generic error is exposed instead.
 		return domain.CanonicalEvent{}, fmt.Errorf("%w: invalid event_ts", domain.ErrInvalidWebhook)
 	}
 	return domain.CanonicalEvent{

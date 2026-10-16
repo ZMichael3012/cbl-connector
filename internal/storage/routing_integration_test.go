@@ -66,7 +66,7 @@ func setupRedis(t *testing.T) *redis.Client {
 	return client
 }
 
-// defaultRules задает набор правил для round-trip проверок.
+// defaultRules specifies a rule set for round-trip checks.
 func defaultRules() []domain.RouteRule {
 	return []domain.RouteRule{
 		{Provider: "sandbox", Operation: domain.OperationInvoice, Networks: []string{"trc20"}, Assets: []string{"USDT"}, Priority: 0, Weight: 3, MinAmount: 100, MaxAmount: 1_000_000, Enabled: true},
@@ -83,18 +83,18 @@ func TestIntegrationRoutingRulesRoundTrip(t *testing.T) {
 	require.NoError(t, repo.Save(ctx, defaultRules()))
 	rules, err := repo.LoadEnabled(ctx)
 	require.NoError(t, err)
-	require.Len(t, rules, 2, "отключенное правило не загружается")
+	require.Len(t, rules, 2, "a disabled rule is not loaded")
 
-	assert.Equal(t, "sandbox", rules[0].Provider, "сортировка по приоритету")
+	assert.Equal(t, "sandbox", rules[0].Provider, "ordered by priority")
 	assert.Equal(t, domain.OperationInvoice, rules[0].Operation)
 	assert.Equal(t, []string{"trc20"}, rules[0].Networks)
 	assert.Equal(t, []string{"USDT"}, rules[0].Assets)
 	assert.Equal(t, 3, rules[0].Weight)
 	assert.Equal(t, int64(100), rules[0].MinAmount)
 	assert.Equal(t, "fallback", rules[1].Provider)
-	assert.Empty(t, rules[1].Networks, "пустые массивы сохраняются как пустые")
+	assert.Empty(t, rules[1].Networks, "empty arrays are stored as empty")
 
-	// Замена конфигурации целиком.
+	// Full configuration replacement.
 	require.NoError(t, repo.Save(ctx, []domain.RouteRule{
 		{Provider: "only", Priority: 0, Weight: 1, Enabled: true},
 	}))
@@ -111,15 +111,15 @@ func TestIntegrationRoutingRulesConstraints(t *testing.T) {
 
 	require.NoError(t, repo.Save(ctx, defaultRules()))
 
-	// CHECK-и БД: вес и границы сумм защищают от прямых записей.
+	// Database CHECKs: the weight and amount bounds guard against direct writes.
 	err := db.Exec(`INSERT INTO routing_rules (id, provider, weight) VALUES (gen_random_uuid(), 'x', 0)`).Error
-	require.Error(t, err, "вес 0 отклоняется БД")
+	require.Error(t, err, "weight 0 is rejected by the database")
 
 	err = db.Exec(`INSERT INTO routing_rules (id, provider, min_amount, max_amount) VALUES (gen_random_uuid(), 'x', 10, 5)`).Error
-	require.Error(t, err, "min > max отклоняется БД")
+	require.Error(t, err, "min > max is rejected by the database")
 
 	err = repo.Save(ctx, []domain.RouteRule{{Provider: "x", Weight: 0, Enabled: true}})
-	require.ErrorIs(t, err, domain.ErrInvalidRoute, "валидация домена до записи")
+	require.ErrorIs(t, err, domain.ErrInvalidRoute, "domain validation before the write")
 }
 
 func TestIntegrationRoutingRulesConcurrentSave(t *testing.T) {
@@ -127,8 +127,8 @@ func TestIntegrationRoutingRulesConcurrentSave(t *testing.T) {
 	repo := storage.NewRouteRulesRepository(db)
 	ctx := context.Background()
 
-	// Конкурентные replace-all не должны оставить объединение конфигураций:
-	// advisory-лок сериализует Save.
+	// Concurrent replace-alls must not leave a merge of configurations:
+	// the advisory lock serializes Save.
 	configs := [][]domain.RouteRule{
 		{{Provider: "alpha", Priority: 0, Weight: 1, Enabled: true}},
 		{{Provider: "beta", Priority: 0, Weight: 1, Enabled: true}},
@@ -143,7 +143,7 @@ func TestIntegrationRoutingRulesConcurrentSave(t *testing.T) {
 		}
 		rules, err := repo.LoadEnabled(ctx)
 		require.NoError(t, err)
-		require.Len(t, rules, 1, "итоговая конфигурация - один из наборов, без объединения")
+		require.Len(t, rules, 1, "the final configuration is one of the sets, with no merge")
 	}
 }
 
@@ -154,7 +154,7 @@ func TestIntegrationRouteConfigCache(t *testing.T) {
 
 	_, ok, err := cache.Get(ctx)
 	require.NoError(t, err)
-	assert.False(t, ok, "пустой кеш - промах")
+	assert.False(t, ok, "an empty cache is a miss")
 
 	require.NoError(t, cache.Set(ctx, defaultRules(), time.Minute))
 	rules, ok, err := cache.Get(ctx)
@@ -165,13 +165,13 @@ func TestIntegrationRouteConfigCache(t *testing.T) {
 	require.NoError(t, cache.Invalidate(ctx))
 	_, ok, err = cache.Get(ctx)
 	require.NoError(t, err)
-	assert.False(t, ok, "после инвалидации - промах")
+	assert.False(t, ok, "after invalidation it is a miss")
 
-	// Поврежденный JSON считается промахом и не ломает выбор.
+	// Corrupted JSON counts as a miss and does not break selection.
 	require.NoError(t, client.Set(ctx, "route:config", "{broken", time.Minute).Err())
 	_, ok, err = cache.Get(ctx)
 	require.NoError(t, err)
-	assert.False(t, ok, "битый JSON - промах")
+	assert.False(t, ok, "broken JSON is a miss")
 }
 
 func TestIntegrationCachedRouteRules(t *testing.T) {
@@ -188,18 +188,18 @@ func TestIntegrationCachedRouteRules(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, first, 2)
 
-	// Прямая замена в БД не видна из-за TTL кеша: источник истины обновляется
-	// через Save (инвалидация).
+	// A direct replacement in the database is not visible because of the cache TTL:
+	// the source of truth is updated through Save (invalidation).
 	require.NoError(t, repo.Save(ctx, []domain.RouteRule{{Provider: "only", Priority: 0, Weight: 1, Enabled: true}}))
 	cached, err := source.Load(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, "sandbox", cached[0].Provider, "второе чтение обслуживается кешем")
+	assert.Equal(t, "sandbox", cached[0].Provider, "the second read is served from the cache")
 
 	require.NoError(t, source.Save(ctx, []domain.RouteRule{{Provider: "only", Priority: 0, Weight: 1, Enabled: true}}))
 	fresh, err := source.Load(ctx)
 	require.NoError(t, err)
 	require.Len(t, fresh, 1)
-	assert.Equal(t, "only", fresh[0].Provider, "Save инвалидирует кеш")
+	assert.Equal(t, "only", fresh[0].Provider, "Save invalidates the cache")
 }
 
 func TestIntegrationCachedRouteRulesRedisDown(t *testing.T) {
@@ -209,7 +209,7 @@ func TestIntegrationCachedRouteRulesRedisDown(t *testing.T) {
 	repo := storage.NewRouteRulesRepository(db)
 	require.NoError(t, repo.Save(ctx, defaultRules()))
 
-	// Клиент заведомо недоступного Redis: выбор обязан работать через БД (T-11).
+	// A client of a deliberately unreachable Redis: selection must work through the database (T-11).
 	downClient := redis.NewClient(&redis.Options{
 		Addr:         "127.0.0.1:1",
 		DialTimeout:  50 * time.Millisecond,
@@ -220,6 +220,6 @@ func TestIntegrationCachedRouteRulesRedisDown(t *testing.T) {
 	source := usecase.NewCachedRouteRules(repo, storage.NewRouteConfigCache(downClient), time.Minute, zap.NewNop())
 
 	rules, err := source.Load(ctx)
-	require.NoError(t, err, "сбой Redis не ломает загрузку правил")
+	require.NoError(t, err, "a Redis failure does not break rule loading")
 	assert.Len(t, rules, 2)
 }

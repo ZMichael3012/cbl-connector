@@ -1,99 +1,100 @@
-# CBL-3.4. Роутер провайдеров: правила, Capabilities, кеш конфигурации
+# CBL-3.4. Provider router: rules, Capabilities, configuration cache
 
-| Поле | Значение |
+| Field | Value |
 | :-- | :-- |
-| Эпик | E3, Connector |
-| Репозиторий | `cbl-connector` |
-| Размер | M |
-| Волна и параллельная группа | W1-CONNECTOR |
-| Зависит от | 3.1, 3.3 |
-| Версия контрактов | `cbl-protos@cf-1` (не меняется) |
-| Статус | done, ревью закрыто |
+| Epic | E3, Connector |
+| Repository | `cbl-connector` |
+| Size | M |
+| Wave and parallel group | W1-CONNECTOR |
+| Depends on | 3.1, 3.3 |
+| Contract version | `cbl-protos@cf-1` (unchanged) |
+| Status | done, review closed |
 
-## 1. Контекст и цель
+## 1. Context and goal
 
-Выбор провайдера для операции (`CBL-000`: Connector - «роутинг»; `CBL-003`, раздел 3:
-правила маршрутизации - приоритет, сети, лимиты, веса). Задача 3.4 реализует: модель
-правил, источник истины в PostgreSQL connector, кеш конфигурации в Redis (`route:config`,
-TTL 30 - 60 с), селектор провайдеров с фильтрами по возможности и лимитам, взвешенный
-выбор внутри приоритета и агрегированные `Capabilities`. Каждый провайдер оборачивается
-одним экземпляром `gateway.Resilient` (3.3), открытый breaker исключает провайдера из
-выбора, пока есть альтернатива.
+Provider selection for an operation (`CBL-000`: Connector - "routing"; `CBL-003`, section 3:
+routing rules - priority, networks, limits, weights). Task 3.4 implements: the rule
+model, the source of truth in PostgreSQL connector, the configuration cache in Redis (`route:config`,
+TTL 30 - 60 s), a provider selector with capability and limit filters, weighted
+selection within a priority and aggregated `Capabilities`. Every provider is wrapped in
+one `gateway.Resilient` instance (3.3), and an open breaker excludes the provider from
+selection while an alternative exists.
 
-## 2. Границы
+## 2. Boundaries
 
-In scope: модель `RouteRule`, миграция `routing_rules`, GORM-репозиторий, Redis-кеш
-конфигурации с фолбэком на БД, `Router` (реализация `domain.Router`), расширение
-`NetworkCapability.MaxAmount`, unit/integration-тесты.
-Out of scope: адаптеры провайдеров и их регистрация (3.2, KI-01), админ-API правил
-(12.1 - 12.4, контракт появится отдельно), e2e сквозного выбора с mock-gateway (после 3.2),
-метрики (0.7).
+In scope: the `RouteRule` model, the `routing_rules` migration, the GORM repository, the Redis cache
+of the configuration with a DB fallback, `Router` (implementation of `domain.Router`), the extension of
+`NetworkCapability.MaxAmount`, unit/integration tests.
+Out of scope: provider adapters and their registration (3.2, KI-01), the admin rules API
+(12.1 - 12.4, the contract will appear separately), the e2e of end-to-end selection with
+mock-gateway (after 3.2), metrics (0.7).
 
-## 3. Функциональные требования
+## 3. Functional requirements
 
-FR-1. Правило маршрутизации: `provider` (обязателен, видимые ASCII до 64 символов),
-`operation` (`""` - любая, `invoice`, `payout`), `networks[]` и `assets[]` (пусто -
-любые; значения по правилам кода из 3.1, актив не короче 2 символов), `priority`
-(0 - 1 000 000, меньше - важнее), `weight` (1 - 1 000 000, вес внутри приоритета),
-`min_amount`/`max_amount` (необязательные границы в минимальных единицах актива,
-0 - без границы; при обеих границах `min <= max`), `enabled`. Валидация - домен,
-нарушения -> `ErrInvalidRoute`; пределы веса защищают сумму от переполнения.
+FR-1. Routing rule: `provider` (required, visible ASCII up to 64 characters),
+`operation` (`""` - any, `invoice`, `payout`), `networks[]` and `assets[]` (empty -
+any; values follow the code rules from 3.1, asset at least 2 characters), `priority`
+(0 - 1 000 000, lower is more important), `weight` (1 - 1 000 000, weight within a priority),
+`min_amount`/`max_amount` (optional bounds in the asset's minor units,
+0 - no bound; with both bounds `min <= max`), `enabled`. Validation is in the domain;
+violations -> `ErrInvalidRoute`; weight limits protect the sum from overflow.
 
-FR-2. Источник истины - PostgreSQL connector (`routing_rules`, миграция 00003): массивы в
-`jsonb`, `weight > 0` и `min <= max` - CHECK-ограничения; репозиторий загружает только
-включенные правила (сортировка `priority ASC, provider ASC`) и заменяет конфигурацию
-целиком в одной транзакции под advisory-локом (конкурентные `Save` сериализуются, итог -
-ровно одна из конфигураций, без объединения).
+FR-2. The source of truth is PostgreSQL connector (`routing_rules`, migration 00003): arrays in
+`jsonb`, `weight > 0` and `min <= max` are CHECK constraints; the repository loads only
+enabled rules (sorted by `priority ASC, provider ASC`) and replaces the configuration
+as a whole in one transaction under an advisory lock (concurrent `Save` calls are serialized,
+the result is exactly one of the configurations, without merging).
 
-FR-3. Кеш конфигурации в Redis: ключ `route:config` (`CBL-003`, раздел 7), значение -
-JSON-конфигурация правил, TTL `CONNECTOR_ROUTE_CACHE_TTL` (по умолчанию 30 с, диапазон
-30 - 60 с по `CBL-003`). Чтение - cache-aside: попадание возвращает кеш, промах, ошибка
-Redis, битый JSON и семантически некорректный payload (правило не проходит валидацию,
-например обнуленный вес) - загрузка из БД и запись в кеш (сбой записи логируется, не
-ломает выбор). Правила из БД также валидируются: порча источника истины не доходит до
-роутера. `Save` инвалидирует ключ; Redis не является источником истины (T-02).
+FR-3. Configuration cache in Redis: key `route:config` (`CBL-003`, section 7), the value is the
+JSON configuration of rules, TTL `CONNECTOR_ROUTE_CACHE_TTL` (default 30 s, the range
+30 - 60 s per `CBL-003`). Reading is cache-aside: a hit returns the cache; a miss, a Redis error,
+broken JSON and a semantically invalid payload (a rule fails validation,
+for example a zeroed weight) trigger loading from the DB and writing to the cache (a write failure
+is logged and does not break selection). Rules from the DB are also validated: corruption of the
+source of truth does not reach the router. `Save` invalidates the key; Redis is not the
+source of truth (T-02).
 
 FR-4. `Router.Select(ctx, route)`:
-- запрос обязан содержать операцию, сеть, актив и положительную сумму того же актива
-  (`RouteRequest.Validate`); нулевые/отрицательные суммы и чужой актив отклоняются
-  `ErrInvalidRoute` (роутер - последний фильтр перед денежной операцией);
-- имя регистрации провайдера обязано совпадать с `Capabilities().Provider` адаптера
-  (иначе `GetGatewayPayment(provider, ...)` потребителей ломается);
-- правила, отфильтрованные по `operation`, `network`, `asset` и границам `min/max`;
-- провайдер обязан поддерживать сеть с нужным активом и сумму не ниже `MinAmount`
-  (и не выше `MaxAmount`); заданные границы провайдера сверяются с активом и decimals
-  запроса (нулевая граница - без лимита);
-- правила с неположительным весом отбрасываются (defense-in-depth против испорченного
-  источника), нулевая сумма весов - `ErrProviderUnavailable`, а не паника;
-- провайдеры с открытым breaker исключаются; если подходящие есть, но все исключены
-  breaker - `ErrProviderUnavailable`, если не подходят по возможностям -
+- the request must contain the operation, network, asset and a positive amount of the same asset
+  (`RouteRequest.Validate`); zero/negative amounts and a foreign asset are rejected with
+  `ErrInvalidRoute` (the router is the last filter before a money operation);
+- the provider registration name must match the adapter's `Capabilities().Provider`
+  (otherwise `GetGatewayPayment(provider, ...)` of consumers breaks);
+- rules filtered by `operation`, `network`, `asset` and the `min/max` bounds;
+- the provider must support the network with the required asset and an amount not below `MinAmount`
+  (and not above `MaxAmount`); the provider's set bounds are checked against the asset and decimals
+  of the request (zero bound - no limit);
+- rules with a non-positive weight are dropped (defense-in-depth against a corrupted
+  source); a zero sum of weights is `ErrProviderUnavailable`, not a panic;
+- providers with an open breaker are excluded; if suitable ones exist but all are excluded by the
+  breaker - `ErrProviderUnavailable`; if they do not fit by capabilities -
   `ErrUnsupportedNetwork`;
-- выбор: минимальный `priority` среди кандидатов, внутри приоритета - взвешенный случайный
-  выбор по `weight` (потокобезопасный источник: `rand.IntN` уровня пакета; инжектируемый
-  источник оборачивается мьютексом);
-- возвращается декоратор `Resilient` (один экземпляр на провайдера).
+- selection: the minimum `priority` among the candidates; within a priority - weighted random
+  selection by `weight` (thread-safe source: package-level `rand.IntN`; the injectable
+  source is wrapped in a mutex);
+- the `Resilient` decorator is returned (one instance per provider).
 
-FR-5. `Router.Capabilities()` возвращает возможности по каждому зарегистрированному
-провайдеру (для `GetCapabilities` в 3.2/4.x); `NetworkCapability` расширяется
-необязательным `MaxAmount` (0 - без лимита), поставщик проверок - `Capabilities` адаптера.
+FR-5. `Router.Capabilities()` returns the capabilities of every registered
+provider (for `GetCapabilities` in 3.2/4.x); `NetworkCapability` is extended with an
+optional `MaxAmount` (0 - no limit), the supplier of the checks is the adapter's `Capabilities`.
 
-FR-6. Конфигурация: `CONNECTOR_ROUTE_CACHE_TTL` (кеш); реестр провайдеров наполняется
-задачей 3.2 после выбора провайдера (KI-01); репозиторий и кеш подключаются в main сразу
-(лог количества загруженных правил), пустой реестр - `Select` возвращает
+FR-6. Configuration: `CONNECTOR_ROUTE_CACHE_TTL` (cache); the provider registry is filled by
+task 3.2 after the provider is chosen (KI-01); the repository and the cache are wired in main
+immediately (a log of the number of loaded rules); with an empty registry `Select` returns
 `ErrUnsupportedNetwork`.
 
-## 4. Контракты
+## 4. Contracts
 
-Внешние контракты не меняются: `Router` реализует `domain.Router` (CF-1), `route:config` -
-существующий ключ `CBL-003` (раздел 7). Форма правил соответствует `GET/PUT
-/admin/v1/routing-rules` из `CBL-003` (раздел 3): приоритет, сети, лимиты, веса; контракт
-админ-пути финализируется в 12.x (открытый вопрос спеки).
-Маппинг ошибок для транспорта (3.2): `ErrUnsupportedNetwork` -> `INVALID_ARGUMENT`,
-`ErrProviderUnavailable` (включая все breaker open и сбойный источник правил) ->
-`UNAVAILABLE`, сбой загрузки правил из БД/Redis -> `INTERNAL` (клиентские повторы не
-помогут), `ErrInvalidRoute` -> `INVALID_ARGUMENT`.
+External contracts do not change: `Router` implements `domain.Router` (CF-1), `route:config` is an
+existing key of `CBL-003` (section 7). The form of the rules corresponds to `GET/PUT
+/admin/v1/routing-rules` from `CBL-003` (section 3): priority, networks, limits, weights; the
+admin path contract is finalized in 12.x (an open question of the spec).
+Error mapping for the transport (3.2): `ErrUnsupportedNetwork` -> `INVALID_ARGUMENT`,
+`ErrProviderUnavailable` (including all breaker open and a failed rules source) ->
+`UNAVAILABLE`, a failure to load rules from the DB/Redis -> `INTERNAL` (client retries will not
+help), `ErrInvalidRoute` -> `INVALID_ARGUMENT`.
 
-## 5. Модель данных и миграции
+## 5. Data model and migrations
 
 `migrations/00003_routing_rules.sql`:
 
@@ -115,85 +116,87 @@ CREATE TABLE routing_rules (
 CREATE INDEX routing_rules_route_idx ON routing_rules (enabled, priority);
 ```
 
-Массивы хранятся в `jsonb` (GORM-тип `StringList` в storage); `AutoMigrate` запрещен.
+Arrays are stored in `jsonb` (the GORM type `StringList` in storage); `AutoMigrate` is forbidden.
 
-## 6. Конечные автоматы
+## 6. State machines
 
-Не применимо: правила - конфигурация; выбор провайдера stateless, состояние breaker
-читается у `Resilient`.
+Not applicable: rules are configuration; provider selection is stateless, breaker state
+is read from `Resilient`.
 
 ## 7. Edge cases
 
-Пустой реестр провайдеров и пустой список правил; правило на незарегистрированного
-провайдера; расхождение имени регистрации и `Capabilities().Provider` (отказ конструктора);
-правило отключено; `weight = 0`, отрицательный и сверх предела (валидация, CHECK и
-defense-in-depth в роутере); `min > max`; несколько правил одного приоритета (веса) и
-дубликаты правил одного провайдера (веса суммируются выбором); нулевая/отрицательная сумма
-запроса и актив, не совпадающий с `Amount.Asset` (отказ); провайдер не поддерживает
-сеть/актив; заданные границы провайдера с чужим активом/decimals; сумма ниже `MinAmount`
-и вне границ правила; все кандидаты с открытым breaker; смешанные кандидаты; half-open
-пропускает одну пробу, избыток проб получает `ErrTooManyRequests` -> `ErrProviderUnavailable`
-(восстановительное окно принимается, failover - открытый вопрос); промах/попадание кеша;
-поврежденный JSON и семантически испорченный payload кеша (вес 0) - промах с фолбэком;
-порча правил в БД - ошибка до роутера; Redis недоступен; `Save` инвалидирует
-кеш; конкурентные `Save` (advisory-лок, без объединения конфигураций); TTL 30 - 60 с
-(клэмпы); конкурентный `Select` (потокобезопасный выбор).
+An empty provider registry and an empty rules list; a rule for an unregistered
+provider; a mismatch between the registration name and `Capabilities().Provider` (constructor
+rejection); a disabled rule; `weight = 0`, negative and above the limit (validation, CHECK and
+defense-in-depth in the router); `min > max`; several rules of one priority (weights) and
+duplicates of rules of one provider (weights are summed by selection); a zero/negative request
+amount and an asset that does not match `Amount.Asset` (rejection); the provider does not support
+the network/asset; the provider's set bounds with a foreign asset/decimals; an amount below
+`MinAmount` and outside the rule bounds; all candidates with an open breaker; mixed candidates;
+half-open lets one trial through, excess trials get `ErrTooManyRequests` -> `ErrProviderUnavailable`
+(the recovery window is accepted, failover is an open question); cache miss/hit;
+corrupted JSON and a semantically corrupted cache payload (weight 0) - a miss with a fallback;
+rule corruption in the DB - an error before the router; Redis unavailable; `Save` invalidates the
+cache; concurrent `Save` (advisory lock, without merging configurations); TTL 30 - 60 s
+(clamps); concurrent `Select` (thread-safe selection).
 
-## 8. Нефункциональные требования
+## 8. Non-functional requirements
 
-`Select` на прогретом кеше - один Redis GET и фильтрация в памяти (дедлайн
-`GetCapabilities` 200 мс в `CBL-003` соблюдается с запасом; выбор провайдера вызывается
-внутри CreateInvoice с дедлайном 5 с). Redis-сбой не влияет на выбор (фолбэк на БД,
-T-02/T-11). Покрытие router/domain/проверок не ниже 85%; интеграционные тесты -
-реальные PostgreSQL и Redis (testcontainers).
+`Select` on a warm cache is one Redis GET and in-memory filtering (the `GetCapabilities`
+deadline of 200 ms in `CBL-003` is met with margin; the provider selection is called
+inside CreateInvoice with a 5 s deadline). A Redis failure does not affect selection (fallback to
+the DB, T-02/T-11). Coverage of router/domain/checks not below 85%; integration tests - real
+PostgreSQL and Redis (testcontainers).
 
-## 9. План тестов
+## 9. Test plan
 
-| Уровень | Сценарии |
+| Level | Scenarios |
 | :-- | :-- |
-| Unit | домен: валидация правил и запроса (сумма, актив); `Router`: фильтры (operation/сеть/актив/лимиты правила и провайдера, списки сетей и активов), приоритеты, взвешенный выбор (детерминированный rand), дубликаты правил, breaker-open пропуск и полный отказ, нулевые веса (без паники), расхождение имени провайдера, `Capabilities()` по провайдерам, пустой реестр, конкурентный `Select` |
-| Integration (storage) | PostgreSQL: round-trip правил (jsonb-массивы), только enabled, сортировка, CHECK-и, replace-all, конкурентные `Save`; Redis: промах/попадание, битый JSON, недоступный Redis (фолбэк), инвалидация при `Save`; usecase: семантически испорченный кеш - промах, порча БД - ошибка, клэмпы TTL 30 - 60 с |
-| E2E (compose) | не расширяется: провайдеры появятся в 3.2; существующий smoke без изменений |
-| Load | не расширяется |
+| Unit | domain: validation of rules and the request (amount, asset); `Router`: filters (operation/network/asset/rule and provider limits, network and asset lists), priorities, weighted selection (deterministic rand), duplicate rules, breaker-open skip and full rejection, zero weights (no panic), provider name mismatch, `Capabilities()` per provider, empty registry, concurrent `Select` |
+| Integration (storage) | PostgreSQL: rule round-trip (jsonb arrays), enabled only, sorting, CHECKs, replace-all, concurrent `Save`; Redis: miss/hit, broken JSON, unavailable Redis (fallback), invalidation on `Save`; usecase: semantically corrupted cache - a miss, DB corruption - an error, TTL clamps 30 - 60 s |
+| E2E (compose) | not extended: providers will appear in 3.2; compose smoke runs follow the `test/e2e/E2E.md` instruction (scenario E2E_Connector_Smoke, compose stand) without changes |
+| Load | not extended |
 
-## 10. План работ и коммит
+## 10. Work plan and commit
 
-Коммит `CBL-3.4: роутер провайдеров с правилами и кешем`; спека входит в коммит;
-AGENTS (архитектура, env, trade-offs T-CONNECTOR-08/09, KI-connector-08, журнал) и
-`CBL-004` обновляются.
+Commit `CBL-3.4: provider router with rules and cache`; the spec is part of the commit;
+AGENTS (architecture, env, trade-offs T-CONNECTOR-08/09, KI-connector-08, journal) and
+`CBL-004` are updated.
 
-## 11. Открытые вопросы и решения
+## 11. Open questions and decisions
 
-- ADR-3.4: источник истины правил - PostgreSQL connector; Redis - кеш с TTL и фолбэком
-  (T-02, T-11): сбой Redis не влияет на выбор, потеря кеша безопасна; семантически
-  испорченный payload кеша (вес 0 и т.п.) считается промахом, а не доверенным значением.
-- ADR: открытый breaker исключает провайдера из выбора (3.3 + 3.4); в half-open провайдер
-  снова участвует, избыток проб получает `ErrProviderTooManyRequests` ->
-  `ErrProviderUnavailable` - восстановительное окно принимается, автоматический failover
-  на следующего провайдера - открытый вопрос после 3.2.
-- ADR: взвешенный выбор внутри минимального приоритета, а не глобально по весам: приоритет
-  выражает политику («основной провайдер»), вес - распределение внутри эшелона.
-- ADR: конкурентные `Save` сериализуются advisory-локом (replace-all без объединения
-  конфигураций); окно устаревания кеша при гонке «Load до коммита Save» ограничено TTL
-  (не более 60 с) и принято до админ-пути, где появится версия конфигурации.
-- Открытый вопрос: админ-путь записи правил (`GET/PUT /admin/v1/routing-rules`) появится в
-  12.x и требует нового gRPC-контракта в connector, RBAC и аудита (`CBL-003`, раздел 3);
-  до этого правила меняются прямой заменой конфигурации - KI-connector-08.
-- Открытый вопрос: failover на следующий провайдер при отказе выбранного (автоповтор
-  операции у другого провайдера) - вне рамок 3.4; при необходимости - отдельная задача
-  после 3.2.
+- ADR-3.4: the source of truth for rules is PostgreSQL connector; Redis is a cache with TTL and
+  fallback (T-02, T-11): a Redis failure does not affect selection, cache loss is safe; a
+  semantically corrupted cache payload (weight 0 and the like) is treated as a miss, not a
+  trusted value.
+- ADR: an open breaker excludes the provider from selection (3.3 + 3.4); in half-open the provider
+  participates again, excess trials get `ErrProviderTooManyRequests` ->
+  `ErrProviderUnavailable` - the recovery window is accepted, automatic failover
+  to the next provider is an open question after 3.2.
+- ADR: weighted selection within the minimum priority, not globally by weights: priority
+  expresses policy ("primary provider"), weight - distribution within the echelon.
+- ADR: concurrent `Save` calls are serialized by an advisory lock (replace-all without merging
+  configurations); the cache staleness window in the "Load before the Save commit" race is limited
+  by TTL (no more than 60 s) and is accepted until the admin path, where a configuration version
+  will appear.
+- Open question: the admin path for writing rules (`GET/PUT /admin/v1/routing-rules`) will appear
+  in 12.x and requires a new gRPC contract in connector, RBAC and audit (`CBL-003`, section 3);
+  until then rules are changed by direct configuration replacement - KI-connector-08.
+- Open question: failover to the next provider when the selected one fails (automatic retry
+  of the operation at another provider) is out of scope of 3.4; if needed - a separate task
+  after 3.2.
 
-## 12. Ревью (CBL-001, шаг 6)
+## 12. Review (CBL-001, step 6)
 
-Четыре независимых прохода (14.10.2026). Блокер: кеш `route:config` принимался без
-семантической валидации (вес 0 -> паника `IntN`, отравление конфигурации) - закрыт
-валидацией payload на чтении и guard-ами в роутере. Major: гонка `*rand.Rand`,
-неатомарный конкурентный `Save`, расхождение TTL с `CBL-003` - закрыты; rand стал
-потокобезопасным, `Save` под advisory-локом, TTL выровнен (30 - 60 с).
+Four independent passes (14.10.2026). Blocker: the `route:config` cache was accepted without
+semantic validation (weight 0 -> an `IntN` panic, configuration poisoning) - closed by payload
+validation on read and guards in the router. Major: the `*rand.Rand` race, a non-atomic concurrent
+`Save`, TTL divergence from `CBL-003` - closed; rand became thread-safe, `Save` under an advisory
+lock, TTL aligned (30 - 60 s).
 
-| Роль | Ключевые замечания | Закрытие |
+| Role | Key findings | Closure |
 | :-- | :-- | :-- |
-| Без контекста | гонка `*rand.Rand` в конкурентном `Select`; паника на испорченном кеше; main подключает источник только при Redis; пробелы тестов (списки сетей/активов, дубликаты правил); артефакт `cover` | потокобезопасный `pick` (rand.IntN + мьютекс для инжектируемого); валидация кеша и guard весов; репозиторий подключается всегда, Redis опционален; добавлены тесты; артефакт удален, `.gitignore` дополнен |
-| Архитектуры | гонка rand; паника на кеше; TTL клэмпы против `CBL-003`; Redis в main без таймаутов; half-open не описан в ADR; имя регистрации vs Capabilities; ошибка правил не классифицирована; админ-путь требует нового контракта | все закрыты: TTL 30 - 60 с, таймауты Redis, half-open в ADR, валидация имени, маппинг в §4, KI-connector-08 расширен (RPC/RBAC/аудит) |
-| С контекстом | гонка rand; паника кеша; TTL vs CBL-003; Redis без таймаутов; main завязан на REDIS_ADDR; хвосты AGENTS/CBL-004/.env.example; артефакт cover; пробелы тестов и `RouteRequest` без проверки суммы | закрыты: rand-обертка, валидация кеша/guard, TTL, таймауты по образцу quote, источник всегда, документация этим коммитом, сумма и актив проверяются |
-| Безопасности | BLOCKER: отравление `route:config` (паника/отказ маршрутизации/снятие лимитов); major: лимиты без asset/decimals и сумма без знака; гонка rand; конкурентный `Save` + окно устаревания; Redis без таймаутов | валидация кеша + guard весов; `RouteRequest.Validate` (положительная сумма, совпадение актива), сверка asset/decimals заданных границ; потокобезопасный pick; advisory-локи и зафиксированное окно ≤ TTL; таймауты Redis |
+| No-context | `*rand.Rand` race in concurrent `Select`; panic on a corrupted cache; main wires the source only with Redis; test gaps (network/asset lists, duplicate rules); `cover` artifact | thread-safe `pick` (rand.IntN + mutex for the injectable one); cache validation and weight guards; the repository is always wired, Redis is optional; tests added; the artifact removed, `.gitignore` extended |
+| Architecture | rand race; cache panic; TTL clamps vs `CBL-003`; Redis in main without timeouts; half-open not described in the ADR; registration name vs Capabilities; the rules error not classified; the admin path requires a new contract | all closed: TTL 30 - 60 s, Redis timeouts, half-open in the ADR, name validation, mapping in §4, KI-connector-08 extended (RPC/RBAC/audit) |
+| With-context | rand race; cache panic; TTL vs CBL-003; Redis without timeouts; main tied to REDIS_ADDR; AGENTS/CBL-004/.env.example loose ends; cover artifact; test gaps and `RouteRequest` without amount validation | closed: the rand wrapper, cache validation/guard, TTL, timeouts modeled on cbl-quote, the source is always wired, documentation by this commit, amount and asset are validated |
+| Security | BLOCKER: `route:config` poisoning (panic/routing rejection/limit removal); major: limits without asset/decimals and an amount without a sign; rand race; concurrent `Save` + staleness window; Redis without timeouts | cache validation + weight guards; `RouteRequest.Validate` (positive amount, asset match), asset/decimals check of the set bounds; thread-safe pick; advisory locks and a fixed window <= TTL; Redis timeouts |

@@ -16,19 +16,19 @@ import (
 	"github.com/cbl/cbl-connector/internal/domain"
 )
 
-// ProviderRegistration описывает регистрацию провайдера в роутере.
+// ProviderRegistration describes a provider registration in the router.
 type ProviderRegistration struct {
-	// Name задает имя провайдера (совпадает с правилами маршрутизации).
+	// Name sets the provider name (it matches the routing rules).
 	Name string
-	// Gateway задает адаптер провайдера; оборачивается в Resilient.
+	// Gateway sets the provider adapter; it is wrapped into Resilient.
 	Gateway domain.PaymentGateway
 }
 
-// RouterOption настраивает Router.
+// RouterOption configures Router.
 type RouterOption func(*Router)
 
-// WithRouterRand подключает источник случайности для взвешенного выбора
-// (детерминированные тесты); обертка делает доступ потокобезопасным.
+// WithRouterRand attaches a randomness source for the weighted selection
+// (deterministic tests); the wrapper makes access thread-safe.
 func WithRouterRand(source *rand.Rand) RouterOption {
 	return func(r *Router) {
 		if source == nil {
@@ -43,7 +43,7 @@ func WithRouterRand(source *rand.Rand) RouterOption {
 	}
 }
 
-// WithRouterLogger подключает логгер роутера.
+// WithRouterLogger attaches the router logger.
 func WithRouterLogger(log *zap.Logger) RouterOption {
 	return func(r *Router) {
 		if log != nil {
@@ -52,13 +52,13 @@ func WithRouterLogger(log *zap.Logger) RouterOption {
 	}
 }
 
-// WithResilientOptions задает опции оберток Resilient для всех провайдеров.
+// WithResilientOptions sets the options of the Resilient wrappers for all providers.
 func WithResilientOptions(opts ...Option) RouterOption {
 	return func(r *Router) { r.resilientOpts = append(r.resilientOpts, opts...) }
 }
 
-// Router выбирает провайдера по правилам маршрутизации; каждый провайдер
-// оборачивается одним экземпляром Resilient (3.3).
+// Router selects a provider according to the routing rules; each provider
+// is wrapped into a single Resilient instance (3.3).
 type Router struct {
 	providers     map[string]*Resilient
 	cfg           Config
@@ -68,7 +68,7 @@ type Router struct {
 	resilientOpts []Option
 }
 
-// NewRouter создает роутер из правил и зарегистрированных провайдеров.
+// NewRouter creates a router from the rules and the registered providers.
 func NewRouter(rules domain.RouteRulesSource, registrations []ProviderRegistration, cfg Config, opts ...RouterOption) (*Router, error) {
 	if rules == nil {
 		return nil, errors.New("gateway: nil route rules source")
@@ -77,9 +77,9 @@ func NewRouter(rules domain.RouteRulesSource, registrations []ProviderRegistrati
 		providers: make(map[string]*Resilient, len(registrations)),
 		cfg:       cfg,
 		rules:     rules,
-		// rand.IntN уровня пакета потокобезопасен; инжектируемый источник
-		// оборачивается мьютексом (WithRouterRand).
-		pick: rand.IntN, //nolint:gosec // G404: взвешенный выбор провайдера, не криптография
+		// Package-level rand.IntN is thread-safe; an injected source
+		// is wrapped with a mutex (WithRouterRand).
+		pick: rand.IntN, //nolint:gosec // G404: weighted provider selection, not cryptography
 		log:  zap.NewNop(),
 	}
 	for _, opt := range opts {
@@ -97,8 +97,8 @@ func NewRouter(rules domain.RouteRulesSource, registrations []ProviderRegistrati
 			return nil, fmt.Errorf("gateway: duplicate provider %s", name)
 		}
 		if provider := registration.Gateway.Capabilities().Provider; provider != "" && provider != name {
-			// Имя регистрации - ключ правил и логов; расхождение с именем
-			// адаптера ломает GetGatewayPayment(provider, ...) у потребителей.
+			// The registration name is the key for rules and logs; a mismatch
+			// with the adapter name breaks GetGatewayPayment(provider, ...) for consumers.
 			return nil, fmt.Errorf("gateway: provider name %q does not match capabilities %q", name, provider)
 		}
 		router.providers[name] = New(registration.Gateway, cfg, router.resilientOpts...)
@@ -106,9 +106,9 @@ func NewRouter(rules domain.RouteRulesSource, registrations []ProviderRegistrati
 	return router, nil
 }
 
-// Select возвращает провайдера для запроса: минимальный приоритет подходящего
-// правила, внутри приоритета - взвешенный выбор; провайдеры с открытым breaker
-// исключаются, пока есть альтернатива.
+// Select returns a provider for the request: the minimum priority among matching
+// rules, with a weighted choice within the priority; providers with an open breaker
+// are excluded while an alternative exists.
 func (r *Router) Select(ctx context.Context, req domain.RouteRequest) (domain.PaymentGateway, error) {
 	if err := req.Validate(); err != nil {
 		return nil, err
@@ -136,8 +136,8 @@ func (r *Router) Select(ctx context.Context, req domain.RouteRequest) (domain.Pa
 			continue
 		}
 		if rule.Weight <= 0 {
-			// Defense-in-depth: недоверенный источник (кеш) с нулевым весом
-			// не должен приводить к панике IntN; конфигурация считается сломанной.
+			// Defense-in-depth: an untrusted source (cache) with a zero weight
+			// must not cause an IntN panic; the configuration is considered broken.
 			weightInvalid = true
 			continue
 		}
@@ -175,8 +175,8 @@ func (r *Router) Select(ctx context.Context, req domain.RouteRequest) (domain.Pa
 		}
 	}
 	if totalWeight <= 0 {
-		// Defense-in-depth: недоверенный источник с обнуленными весами не
-		// должен приводить к панике выбора.
+		// Defense-in-depth: an untrusted source with zeroed weights must not
+		// cause a selection panic.
 		return nil, fmt.Errorf("%w: zero weight for %s/%s", domain.ErrProviderUnavailable, req.Network, req.Asset)
 	}
 	pick := r.pick(totalWeight)
@@ -194,11 +194,11 @@ func (r *Router) Select(ctx context.Context, req domain.RouteRequest) (domain.Pa
 		}
 		pick -= candidate.weight
 	}
-	// Недостижимо: сумма весов покрывает pick.
+	// Unreachable: the weight sum covers pick.
 	return nil, fmt.Errorf("%w: weighted selection failed", domain.ErrProviderUnavailable)
 }
 
-// Capabilities возвращает возможности каждого зарегистрированного провайдера.
+// Capabilities returns the capabilities of every registered provider.
 func (r *Router) Capabilities() map[string]domain.Capabilities {
 	capabilities := make(map[string]domain.Capabilities, len(r.providers))
 	for name, provider := range r.providers {
@@ -207,7 +207,7 @@ func (r *Router) Capabilities() map[string]domain.Capabilities {
 	return capabilities
 }
 
-// Providers возвращает имена зарегистрированных провайдеров в порядке сортировки.
+// Providers returns the names of the registered providers in sorted order.
 func (r *Router) Providers() []string {
 	names := make([]string, 0, len(r.providers))
 	for name := range r.providers {
@@ -217,7 +217,7 @@ func (r *Router) Providers() []string {
 	return names
 }
 
-// ruleMatches проверяет операцию, сеть, актив и границы сумм правила.
+// ruleMatches checks the operation, network, asset, and amount bounds of the rule.
 func ruleMatches(rule domain.RouteRule, req domain.RouteRequest) bool {
 	if rule.Operation != "" && rule.Operation != req.Operation {
 		return false
@@ -238,7 +238,7 @@ func ruleMatches(rule domain.RouteRule, req domain.RouteRequest) bool {
 	return true
 }
 
-// capabilitySupports проверяет поддержку сети и актива провайдером и лимиты суммы.
+// capabilitySupports checks the provider support for the network and asset and the amount limits.
 func capabilitySupports(capabilities domain.Capabilities, req domain.RouteRequest) bool {
 	network, ok := capabilities.Networks[req.Network]
 	if !ok || network.Asset != req.Asset {
@@ -251,8 +251,8 @@ func capabilitySupports(capabilities domain.Capabilities, req domain.RouteReques
 	return limitWithin(network.MaxAmount, req, amount, true)
 }
 
-// limitWithin проверяет границу суммы провайдера: нулевая граница (0)
-// означает отсутствие лимита, заданная - сверяет актив, decimals и величину.
+// limitWithin checks a provider amount bound: a zero bound (0)
+// means no limit; a set bound checks the asset, decimals, and value.
 func limitWithin(limit money.Money, req domain.RouteRequest, amount int64, upper bool) bool {
 	if limit.MinorUnits == 0 {
 		return true
@@ -266,7 +266,7 @@ func limitWithin(limit money.Money, req domain.RouteRequest, amount int64, upper
 	return amount >= limit.MinorUnits
 }
 
-// contains сообщает, что список содержит значение.
+// contains reports that the list contains the value.
 func contains(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {

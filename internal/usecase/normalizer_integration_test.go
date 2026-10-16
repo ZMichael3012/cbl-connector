@@ -31,10 +31,10 @@ import (
 	"github.com/cbl/cbl-connector/internal/usecase"
 )
 
-// integrationPaymentID повторяет UUID платежа из sandboxValidBody.
+// integrationPaymentID repeats the payment UUID from sandboxValidBody.
 const integrationPaymentID = sandboxPaymentID
 
-// setupNormalizerDB запускает PostgreSQL, применяет миграции и собирает Processor.
+// setupNormalizerDB starts PostgreSQL, applies migrations and assembles the Processor.
 func setupNormalizerDB(t *testing.T) (*gorm.DB, *inbox.Processor) {
 	t.Helper()
 	ctx := context.Background()
@@ -70,7 +70,7 @@ func setupNormalizerDB(t *testing.T) (*gorm.DB, *inbox.Processor) {
 	return db, processor
 }
 
-// marshalRaw собирает payload сырого вебхука для сообщения.
+// marshalRaw builds the raw webhook payload for a message.
 func marshalRaw(t *testing.T, provider string, signatureVerified bool, body string) []byte {
 	t.Helper()
 	raw := &eventsv1.GatewayWebhookRaw{
@@ -85,7 +85,7 @@ func marshalRaw(t *testing.T, provider string, signatureVerified bool, body stri
 	return payload
 }
 
-// rawMessage собирает сообщение консьюмер-конверта с сырым вебхуком.
+// rawMessage builds a consumer envelope message carrying the raw webhook.
 func rawMessage(t *testing.T, eventID string, payload []byte) inbox.Message {
 	t.Helper()
 	return inbox.Message{
@@ -135,12 +135,12 @@ func TestIntegrationNormalizerSkipsDuplicateRawEvent(t *testing.T) {
 	message := rawMessage(t, eventID, marshalRaw(t, "mock", true, sandboxValidBody))
 
 	require.NoError(t, processor.Process(ctx, message))
-	require.NoError(t, processor.Process(ctx, message), "повторная доставка подтверждается без эффекта")
+	require.NoError(t, processor.Process(ctx, message), "a redelivery is acknowledged with no effect")
 
 	var outboxCount, inboxCount int64
 	require.NoError(t, db.Model(&outbox.Record{}).Count(&outboxCount).Error)
 	require.NoError(t, db.Table("inbox").Count(&inboxCount).Error)
-	assert.Equal(t, int64(1), outboxCount, "дубликат не создает второй конверт")
+	assert.Equal(t, int64(1), outboxCount, "a duplicate does not create a second envelope")
 	assert.Equal(t, int64(1), inboxCount)
 }
 
@@ -161,16 +161,16 @@ func TestIntegrationNormalizerRejections(t *testing.T) {
 		`{"payment_id":"p","gateway_id":"g","status":"weird","received_amount":{"minor_units":1,"asset":"USDT","decimals":2},"event_ts":"2026-10-14T12:00:00Z"}`))
 	require.ErrorIs(t, processor.Process(ctx, badStatus), domain.ErrUnknownState)
 
-	// Poison pill из security review: гигантский event_ts отклоняется с короткой
-	// ошибкой, retry-конверт остается маленьким и достижимым для DLQ.
+	// Poison pill from the security review: a giant event_ts is rejected with a short
+	// error, the retry envelope stays small and reachable for the DLQ.
 	poison := rawMessage(t, "01a138fd-0000-7000-8000-000000000007", marshalRaw(t, "mock", true,
 		`{"payment_id":"`+integrationPaymentID+`","gateway_id":"g","status":"confirmed","received_amount":{"minor_units":1,"asset":"USDT","decimals":2},"event_ts":"`+
 			strings.Repeat("2", 300*(1<<10))+`"}`))
 	poisonErr := processor.Process(ctx, poison)
 	require.ErrorIs(t, poisonErr, domain.ErrInvalidWebhook)
-	assert.Less(t, len(poisonErr.Error()), 400, "текст ошибки ограничен, x-error не раздувается")
+	assert.Less(t, len(poisonErr.Error()), 400, "the error text is bounded, x-error does not inflate")
 
 	var count int64
 	require.NoError(t, db.Model(&outbox.Record{}).Count(&count).Error)
-	assert.Zero(t, count, "отклоненные события не публикуются")
+	assert.Zero(t, count, "rejected events are not published")
 }

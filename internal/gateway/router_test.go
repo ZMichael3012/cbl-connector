@@ -17,13 +17,13 @@ import (
 	"github.com/cbl/cbl-connector/internal/domain"
 )
 
-// fakeRules отдает фиксированный набор правил или ошибку.
+// fakeRules returns a fixed set of rules or an error.
 type fakeRules struct {
 	rules []domain.RouteRule
 	err   error
 }
 
-// Load возвращает подготовленные правила.
+// Load returns the prepared rules.
 func (f *fakeRules) Load(context.Context) ([]domain.RouteRule, error) {
 	if f.err != nil {
 		return nil, f.err
@@ -31,7 +31,7 @@ func (f *fakeRules) Load(context.Context) ([]domain.RouteRule, error) {
 	return f.rules, nil
 }
 
-// capabilities собирает возможности провайдера по одной сети.
+// capabilities builds the provider capabilities for a single network.
 func capabilities(provider, network, asset string, minAmount, maxAmount int64) domain.Capabilities {
 	return domain.Capabilities{
 		Provider: provider,
@@ -57,7 +57,7 @@ func invoiceRequest(network, asset string, amount int64) domain.RouteRequest {
 func newTestRouter(t *testing.T, rules []domain.RouteRule, registrations []ProviderRegistration, cfg Config) *Router {
 	t.Helper()
 	router, err := NewRouter(&fakeRules{rules: rules}, registrations, cfg,
-		WithRouterRand(rand.New(rand.NewPCG(1, 2)))) //nolint:gosec // G404: детерминированный rand теста
+		WithRouterRand(rand.New(rand.NewPCG(1, 2)))) //nolint:gosec // G404: deterministic test rand
 	require.NoError(t, err)
 	return router
 }
@@ -104,7 +104,7 @@ func TestRouterWeightedChoiceWithinPriority(t *testing.T) {
 			heavyPicks++
 		}
 	}
-	assert.Greater(t, heavyPicks, 800, "вес 9/10 должен заметно преобладать")
+	assert.Greater(t, heavyPicks, 800, "a weight of 9/10 must clearly dominate")
 	assert.Less(t, heavyPicks, 980)
 }
 
@@ -214,13 +214,13 @@ func TestRouterSkipsOpenBreaker(t *testing.T) {
 	assert.Equal(t, "primary", selected.Capabilities().Provider)
 
 	_, err = selected.CreateInvoice(context.Background(), domain.CreateInvoiceRequest{IdempotencyKey: "k-1"})
-	require.Error(t, err, "сбойная попытка открывает breaker primary")
+	require.Error(t, err, "a failing attempt opens the primary breaker")
 
 	selected, err = router.Select(context.Background(), invoiceRequest("trc20", "USDT", 500))
 	require.NoError(t, err)
-	assert.Equal(t, "fallback", selected.Capabilities().Provider, "открытый breaker исключен из выбора")
+	assert.Equal(t, "fallback", selected.Capabilities().Provider, "the open breaker is excluded from the selection")
 
-	// Оба провайдера недоступны: выбор отклоняется.
+	// Both providers are unavailable: the selection is rejected.
 	fallback.alwaysErr = fmt.Errorf("%w: down", domain.ErrTemporary)
 	_, err = selected.CreateInvoice(context.Background(), domain.CreateInvoiceRequest{IdempotencyKey: "k-2"})
 	require.Error(t, err)
@@ -243,10 +243,10 @@ func TestRouterCapsAndRuleLists(t *testing.T) {
 	router := newTestRouter(t, rules, []ProviderRegistration{{Name: "sandbox", Gateway: gateway}}, testConfig())
 
 	selected, err := router.Select(context.Background(), invoiceRequest("trc20", "USDT", 500))
-	require.NoError(t, err, "совпадение по спискам сетей и активов")
+	require.NoError(t, err, "match on the network and asset lists")
 	assert.Equal(t, "sandbox", selected.Capabilities().Provider)
 
-	// Актив сети провайдера не совпадает с запросом.
+	// The provider network asset does not match the request.
 	ethGateway := &fakeGateway{capability: capabilities("sandbox", "trc20", "ETH", 0, 0)}
 	otherRouter := newTestRouter(t, rules, []ProviderRegistration{{Name: "sandbox", Gateway: ethGateway}}, testConfig())
 	_, err = otherRouter.Select(context.Background(), invoiceRequest("trc20", "USDT", 500))
@@ -259,7 +259,7 @@ func TestRouterZeroWeightGuards(t *testing.T) {
 	first := &fakeGateway{capability: capabilities("first", "trc20", "USDT", 0, 0)}
 	second := &fakeGateway{capability: capabilities("second", "trc20", "USDT", 0, 0)}
 
-	// Некорректный (испорченный) источник отдает вес 0: кандидат отбрасывается.
+	// An invalid (corrupted) source returns weight 0: the candidate is discarded.
 	rules := []domain.RouteRule{
 		{Provider: "first", Priority: 0, Weight: 0, Enabled: true},
 		{Provider: "second", Priority: 1, Weight: 1, Enabled: true},
@@ -272,7 +272,7 @@ func TestRouterZeroWeightGuards(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "second", selected.Capabilities().Provider)
 
-	// Все веса нулевые: отказ вместо паники IntN.
+	// All weights are zero: a rejection instead of an IntN panic.
 	broken := newTestRouter(t, []domain.RouteRule{
 		{Provider: "first", Priority: 0, Weight: 0, Enabled: true},
 	}, []ProviderRegistration{{Name: "first", Gateway: first}}, testConfig())
@@ -304,7 +304,7 @@ func TestRouterConcurrentSelect(t *testing.T) {
 	router := newTestRouter(t, []domain.RouteRule{
 		{Provider: "sandbox", Priority: 0, Weight: 3, Enabled: true},
 	}, []ProviderRegistration{{Name: "sandbox", Gateway: gateway}}, testConfig())
-	// Без WithRouterRand используется потокобезопасный rand.IntN уровня пакета.
+	// Without WithRouterRand, the thread-safe package-level rand.IntN is used.
 	router.pick = rand.IntN
 
 	var wg sync.WaitGroup
@@ -378,7 +378,7 @@ func TestRouterErrors(t *testing.T) {
 		_, err := NewRouter(&fakeRules{}, []ProviderRegistration{
 			{Name: "sandbox", Gateway: other},
 		}, testConfig())
-		require.Error(t, err, "имя регистрации обязано совпадать с провайдером адаптера")
+		require.Error(t, err, "the registration name must match the adapter provider")
 	})
 
 	t.Run("rules source error", func(t *testing.T) {

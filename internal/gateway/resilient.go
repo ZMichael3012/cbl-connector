@@ -1,5 +1,5 @@
-// Пакет gateway содержит адаптеры и декораторы порта внешнего шлюза:
-// устойчивость вызовов провайдера (таймауты, ретраи, circuit breaker, bulkhead).
+// Package gateway contains adapters and decorators of the external gateway port:
+// provider call resilience (timeouts, retries, circuit breaker, bulkhead).
 package gateway
 
 import (
@@ -18,8 +18,8 @@ import (
 	"github.com/cbl/cbl-connector/internal/domain"
 )
 
-// Бюджеты попыток: дедлайн RPC против провайдера (CBL-003) делится между
-// попытками с запасом, чтобы одна попытка оставляла место на повтор.
+// Attempt budgets: the RPC deadline against the provider (CBL-003) is split
+// between attempts with headroom so that one attempt leaves room for a retry.
 const (
 	attemptTimeoutInvoice      = 2 * time.Second
 	attemptTimeoutPayment      = time.Second
@@ -27,29 +27,29 @@ const (
 	attemptTimeoutPayoutStatus = time.Second
 )
 
-// Config описывает параметры устойчивости вызовов провайдера.
+// Config describes the resilience parameters of provider calls.
 type Config struct {
-	// MaxAttempts задает предельное число попыток одной операции.
+	// MaxAttempts sets the maximum number of attempts for one operation.
 	MaxAttempts int
-	// RetryBase задает базовую задержку между попытками.
+	// RetryBase sets the base delay between attempts.
 	RetryBase time.Duration
-	// RetryMax задает потолок задержки между попытками.
+	// RetryMax sets the delay ceiling between attempts.
 	RetryMax time.Duration
-	// RetryJitter задает долю случайного разброса задержки (0 - без jitter).
+	// RetryJitter sets the fraction of random delay spread (0 means no jitter).
 	RetryJitter float64
-	// BreakerFailureThreshold задает число подряд неудачных попыток до размыкания.
+	// BreakerFailureThreshold sets the number of consecutive failed attempts before tripping.
 	BreakerFailureThreshold uint32
-	// BreakerTimeout задает время нахождения breaker в открытом состоянии.
+	// BreakerTimeout sets how long the breaker stays open.
 	BreakerTimeout time.Duration
-	// BreakerHalfOpenRequests задает число пробных вызовов в half-open.
+	// BreakerHalfOpenRequests sets the number of trial calls in half-open state.
 	BreakerHalfOpenRequests uint32
-	// BulkheadMax задает предельное число одновременных вызовов провайдера.
+	// BulkheadMax sets the maximum number of concurrent provider calls.
 	BulkheadMax int
-	// AttemptTimeout перекрывает пер-методные таймауты попыток (0 - defaults).
+	// AttemptTimeout overrides the per-method attempt timeouts (0 means defaults).
 	AttemptTimeout time.Duration
 }
 
-// DefaultConfig возвращает параметры устойчивости по умолчанию.
+// DefaultConfig returns the default resilience parameters.
 func DefaultConfig() Config {
 	return Config{
 		MaxAttempts:             3,
@@ -63,8 +63,8 @@ func DefaultConfig() Config {
 	}
 }
 
-// ConfigFromEnv собирает конфигурацию из переменных окружения; некорректные
-// значения игнорируются и остается значение по умолчанию.
+// ConfigFromEnv builds the configuration from environment variables; invalid
+// values are ignored and the default value remains.
 func ConfigFromEnv(getenv func(string) string) Config {
 	cfg := DefaultConfig()
 	cfg.MaxAttempts = intFromEnv(getenv, "CONNECTOR_RETRY_MAX_ATTEMPTS", cfg.MaxAttempts)
@@ -78,7 +78,7 @@ func ConfigFromEnv(getenv func(string) string) Config {
 	return cfg
 }
 
-// intFromEnv читает положительное целое; пустое или некорректное - fallback.
+// intFromEnv reads a positive integer; empty or invalid means fallback.
 func intFromEnv(getenv func(string) string, key string, fallback int) int {
 	raw := getenv(key)
 	if raw == "" {
@@ -91,8 +91,8 @@ func intFromEnv(getenv func(string) string, key string, fallback int) int {
 	return value
 }
 
-// uint32FromEnv читает положительное целое в пределах uint32; пустое или
-// некорректное значение дает fallback.
+// uint32FromEnv reads a positive integer within the uint32 range; an empty or
+// invalid value yields the fallback.
 func uint32FromEnv(getenv func(string) string, key string, fallback uint32) uint32 {
 	raw := getenv(key)
 	if raw == "" {
@@ -105,7 +105,7 @@ func uint32FromEnv(getenv func(string) string, key string, fallback uint32) uint
 	return uint32(value)
 }
 
-// durationFromEnv читает положительную длительность; пустая или некорректная - fallback.
+// durationFromEnv reads a positive duration; an empty or invalid value means fallback.
 func durationFromEnv(getenv func(string) string, key string, fallback time.Duration) time.Duration {
 	raw := getenv(key)
 	if raw == "" {
@@ -118,8 +118,8 @@ func durationFromEnv(getenv func(string) string, key string, fallback time.Durat
 	return value
 }
 
-// Пределы конфигурации: защищают от «валидных, но безумных» значений env,
-// которые отключили бы защиту провайдера или выели слоты bulkhead.
+// Configuration limits: they protect against "valid but insane" env values
+// that would disable provider protection or eat up the bulkhead slots.
 const (
 	maxAttemptsLimit        = 10
 	maxRetryDelayLimit      = 30 * time.Second
@@ -130,8 +130,8 @@ const (
 	maxAttemptTimeoutLimit  = 30 * time.Second
 )
 
-// normalizeConfig приводит параметры к рабочему диапазону: нули и перекосы
-// заменяются значениями по умолчанию или ограничиваются сверху.
+// normalizeConfig brings the parameters into the working range: zeros and
+// outliers are replaced with defaults or capped from above.
 func normalizeConfig(cfg Config) Config {
 	defaults := DefaultConfig()
 	switch {
@@ -191,10 +191,10 @@ func normalizeConfig(cfg Config) Config {
 	return cfg
 }
 
-// Option настраивает Resilient.
+// Option configures Resilient.
 type Option func(*Resilient)
 
-// WithLogger подключает логгер наблюдения за повторами и breaker.
+// WithLogger attaches a logger for observing retries and the breaker.
 func WithLogger(log *zap.Logger) Option {
 	return func(r *Resilient) {
 		if log != nil {
@@ -203,7 +203,7 @@ func WithLogger(log *zap.Logger) Option {
 	}
 }
 
-// WithTimer подключает таймер backoff (детерминированные тесты).
+// WithTimer attaches the backoff timer (deterministic tests).
 func WithTimer(timer backoff.Timer) Option {
 	return func(r *Resilient) {
 		if timer != nil {
@@ -212,8 +212,8 @@ func WithTimer(timer backoff.Timer) Option {
 	}
 }
 
-// Resilient оборачивает порт провайдера устойчивостью: bulkhead -> retry ->
-// circuit breaker -> таймаут попытки -> адаптер (FR-1).
+// Resilient wraps the provider port with resilience: bulkhead -> retry ->
+// circuit breaker -> attempt timeout -> adapter (FR-1).
 type Resilient struct {
 	inner   domain.PaymentGateway
 	cfg     Config
@@ -223,9 +223,9 @@ type Resilient struct {
 	slots   chan struct{}
 }
 
-// New создает декоратор; inner обязателен (nil отклоняется ошибкой при вызове).
-// Конфигурация нормализуется: нулевые и выходящие за пределы значения
-// заменяются значениями по умолчанию или ограничиваются.
+// New creates the decorator; inner is mandatory (nil is rejected with an error on call).
+// The configuration is normalized: zero and out-of-range values are replaced
+// with defaults or capped.
 func New(inner domain.PaymentGateway, cfg Config, opts ...Option) *Resilient {
 	resilient := &Resilient{
 		inner: inner,
@@ -251,9 +251,9 @@ func New(inner domain.PaymentGateway, cfg Config, opts ...Option) *Resilient {
 			return counts.ConsecutiveFailures >= cfg.BreakerFailureThreshold
 		},
 		IsSuccessful: func(err error) bool {
-			// Неудача провайдера - только временные сбои и таймауты попыток;
-			// бизнес-отказы и отмена вызывающего не являются деградацией
-			// провайдера и не должны размыкать breaker для всех мерчантов.
+			// A provider failure is only a temporary failure or an attempt
+			// timeout; business rejections and caller cancellation are not
+			// provider degradation and must not trip the breaker for all merchants.
 			if err == nil {
 				return true
 			}
@@ -269,11 +269,11 @@ func New(inner domain.PaymentGateway, cfg Config, opts ...Option) *Resilient {
 	return resilient
 }
 
-// CreateInvoice создает счет во внешнем шлюзе с ретраями временных сбоев.
+// CreateInvoice creates an invoice in the external gateway with retries on temporary failures.
 func (r *Resilient) CreateInvoice(ctx context.Context, req domain.CreateInvoiceRequest) (domain.Invoice, error) {
 	if strings.TrimSpace(req.IdempotencyKey) == "" {
-		// Ретрай мутирующего вызова без ключа идемпотентности мог бы создать
-		// второй счет: fail-fast до обращения к провайдеру.
+		// Retrying a mutating call without an idempotency key could create a
+		// second invoice: fail fast before calling the provider.
 		return domain.Invoice{}, fmt.Errorf("%w: CreateInvoice: empty idempotency_key", domain.ErrInvalidGatewayRequest)
 	}
 	return call(r, ctx, "CreateInvoice", attemptTimeoutInvoice, func(attemptCtx context.Context) (domain.Invoice, error) {
@@ -281,17 +281,17 @@ func (r *Resilient) CreateInvoice(ctx context.Context, req domain.CreateInvoiceR
 	})
 }
 
-// GetPayment возвращает статус платежа с ретраями временных сбоев.
+// GetPayment returns the payment status with retries on temporary failures.
 func (r *Resilient) GetPayment(ctx context.Context, gatewayID string) (domain.PaymentStatus, error) {
 	return call(r, ctx, "GetPayment", attemptTimeoutPayment, func(attemptCtx context.Context) (domain.PaymentStatus, error) {
 		return r.inner.GetPayment(attemptCtx, gatewayID)
 	})
 }
 
-// CreatePayout создает выплату с ретраями временных сбоев.
+// CreatePayout creates a payout with retries on temporary failures.
 func (r *Resilient) CreatePayout(ctx context.Context, req domain.PayoutRequest) (domain.Payout, error) {
 	if strings.TrimSpace(req.IdempotencyKey) == "" {
-		// Повтор выплаты без ключа идемпотентности мог бы отправить деньги дважды.
+		// Retrying a payout without an idempotency key could send the money twice.
 		return domain.Payout{}, fmt.Errorf("%w: CreatePayout: empty idempotency_key", domain.ErrInvalidGatewayRequest)
 	}
 	return call(r, ctx, "CreatePayout", attemptTimeoutPayout, func(attemptCtx context.Context) (domain.Payout, error) {
@@ -299,14 +299,14 @@ func (r *Resilient) CreatePayout(ctx context.Context, req domain.PayoutRequest) 
 	})
 }
 
-// GetPayout возвращает статус выплаты с ретраями временных сбоев.
+// GetPayout returns the payout status with retries on temporary failures.
 func (r *Resilient) GetPayout(ctx context.Context, gatewayPayoutID string) (domain.PayoutStatus, error) {
 	return call(r, ctx, "GetPayout", attemptTimeoutPayoutStatus, func(attemptCtx context.Context) (domain.PayoutStatus, error) {
 		return r.inner.GetPayout(attemptCtx, gatewayPayoutID)
 	})
 }
 
-// VerifyWebhook пробрасывается напрямую: локальная проверка подписи без сети.
+// VerifyWebhook is passed through directly: a local signature check without network access.
 func (r *Resilient) VerifyWebhook(headers map[string][]string, rawBody []byte) (domain.CanonicalEvent, error) {
 	if r.inner == nil {
 		return domain.CanonicalEvent{}, fmt.Errorf("%w: nil gateway", domain.ErrProviderUnavailable)
@@ -314,13 +314,13 @@ func (r *Resilient) VerifyWebhook(headers map[string][]string, rawBody []byte) (
 	return r.inner.VerifyWebhook(headers, rawBody)
 }
 
-// Available сообщает, что breaker не открыт: провайдер может получать трафик
-// (роутер 3.4 исключает недоступных провайдеров, пока есть альтернатива).
+// Available reports that the breaker is not open: the provider can receive traffic
+// (the router 3.4 excludes unavailable providers while an alternative exists).
 func (r *Resilient) Available() bool {
 	return r.breaker.State() != gobreaker.StateOpen
 }
 
-// Capabilities пробрасывается напрямую: локальные данные адаптера.
+// Capabilities is passed through directly: local adapter data.
 func (r *Resilient) Capabilities() domain.Capabilities {
 	if r.inner == nil {
 		return domain.Capabilities{}
@@ -328,7 +328,7 @@ func (r *Resilient) Capabilities() domain.Capabilities {
 	return r.inner.Capabilities()
 }
 
-// call выполняет операцию провайдера с bulkhead, ретраями, breaker и таймаутом попытки.
+// call executes a provider operation with the bulkhead, retries, breaker, and attempt timeout.
 func call[T any](r *Resilient, ctx context.Context, operation string, timeout time.Duration, fn func(context.Context) (T, error)) (T, error) {
 	var zero T
 	if r.inner == nil {
@@ -388,17 +388,17 @@ func call[T any](r *Resilient, ctx context.Context, operation string, timeout ti
 	return result, nil
 }
 
-// newBackoff собирает экспоненциальный backoff с потолком и jitter.
+// newBackoff builds an exponential backoff with a ceiling and jitter.
 func (r *Resilient) newBackoff() *backoff.ExponentialBackOff {
 	policy := backoff.NewExponentialBackOff()
 	policy.InitialInterval = r.cfg.RetryBase
 	policy.MaxInterval = r.cfg.RetryMax
 	policy.RandomizationFactor = r.cfg.RetryJitter
-	policy.MaxElapsedTime = 0 // остановка по числу попыток, не по времени
+	policy.MaxElapsedTime = 0 // stopped by the attempt count, not by time
 	return policy
 }
 
-// tryAcquire занимает слот bulkhead без ожидания.
+// tryAcquire takes a bulkhead slot without waiting.
 func (r *Resilient) tryAcquire() bool {
 	select {
 	case r.slots <- struct{}{}:
@@ -408,13 +408,13 @@ func (r *Resilient) tryAcquire() bool {
 	}
 }
 
-// release освобождает слот bulkhead; вызывается строго после успешного acquire.
+// release frees the bulkhead slot; it is called strictly after a successful acquire.
 func (r *Resilient) release() {
 	<-r.slots
 }
 
-// isBusinessOutcome сообщает, что ошибка - ответ провайдера на бизнес-уровне
-// (или баг вызывающего), а не признак недоступности: breaker ее не учитывает.
+// isBusinessOutcome reports that the error is a provider business-level response
+// (or a caller bug), not a sign of unavailability: the breaker does not count it.
 func isBusinessOutcome(err error) bool {
 	return errors.Is(err, domain.ErrRejected) ||
 		errors.Is(err, domain.ErrInvalidRoute) ||
@@ -423,8 +423,8 @@ func isBusinessOutcome(err error) bool {
 		errors.Is(err, domain.ErrUnknownState)
 }
 
-// isRetryable сообщает, что ошибку можно повторить: временные сбои и таймауты
-// попыток; постоянные отказы, отмена вызывающего и открытый breaker - нет.
+// isRetryable reports that the error can be retried: temporary failures and
+// attempt timeouts; permanent failures, caller cancellation, and an open breaker cannot.
 func isRetryable(err error) bool {
 	switch {
 	case err == nil:
@@ -444,12 +444,12 @@ func isRetryable(err error) bool {
 	}
 }
 
-// ConfigFromOSEnv собирает конфигурацию из переменных окружения процесса.
+// ConfigFromOSEnv builds the configuration from the process environment variables.
 func ConfigFromOSEnv() Config {
 	return ConfigFromEnv(envFromOS)
 }
 
-// envFromOS читает переменные окружения процесса (адаптер для ConfigFromEnv).
+// envFromOS reads the process environment variables (adapter for ConfigFromEnv).
 func envFromOS(key string) string {
 	return os.Getenv(key)
 }

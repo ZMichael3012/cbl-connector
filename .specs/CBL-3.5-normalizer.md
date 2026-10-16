@@ -1,65 +1,67 @@
-# CBL-3.5. Нормализатор вебхуков в канонические события
+# CBL-3.5. Webhook normalizer into canonical events
 
-| Поле | Значение |
+| Field | Value |
 | :-- | :-- |
-| Эпик | E3, Gateway Connector |
-| Репозиторий | `cbl-connector` |
-| Размер | M |
-| Волна и параллельная группа | W1-CONNECTOR |
-| Зависит от | 3.1, 1.3 |
-| Версия контрактов | `cbl-protos@cf-1` (`billing/events/v1`) |
-| Статус | done (ревью закрыто, коммит CBL-3.5) |
+| Epic | E3, Gateway Connector |
+| Repository | `cbl-connector` |
+| Size | M |
+| Wave and parallel group | W1-CONNECTOR |
+| Depends on | 3.1, 1.3 |
+| Contract version | `cbl-protos@cf-1` (`billing/events/v1`) |
+| Status | done (review closed, commit CBL-3.5) |
 
-## 1. Контекст и цель
+## 1. Context and goal
 
-Асинхронный контур приема платежа (`CBL-000`, раздел 4): Webhook Ingress публикует сырой
-вебхук в `gateway.webhooks.raw`, Connector нормализует его в `gateway.events.canonical`
-для Payment (4.3) и Reconciler (9.1). Задача строит конвейер нормализации: идемпотентный
-консьюмер (inbox 1.3), порт декодера провайдера, публикация через outbox. Реальные
-провайдерские декодеры придут с адаптерами (3.2, 10.3); до выбора провайдера (KI-01)
-работает универсальный sandbox-декодер для mock-шлюза (3.6).
+The asynchronous payment intake loop (`CBL-000`, section 4): Webhook Ingress publishes the
+raw webhook to `gateway.webhooks.raw`, Connector normalizes it into `gateway.events.canonical`
+for Payment (4.3) and Reconciler (9.1). The task builds the normalization pipeline: an
+idempotent consumer (inbox 1.3), a provider decoder port, publication via outbox. Real
+provider decoders will arrive with the adapters (3.2, 10.3); until the provider is selected
+(KI-01) a universal sandbox decoder for the mock gateway works (3.6).
 
-## 2. Границы
+## 2. Boundaries
 
-In scope: консьюмер `gateway.webhooks.raw` (+ retry-топики), порт `WebhookDecoder` и реестр,
-sandbox-декодер JSON, валидация канонического события, публикация через outbox, миграции
-outbox/inbox, wiring в main, сквозной тест на реальных Kafka и PostgreSQL.
+In scope: consumer of `gateway.webhooks.raw` (+ retry topics), the `WebhookDecoder` port and
+registry, sandbox JSON decoder, canonical event validation, publication via outbox,
+outbox/inbox migrations, wiring in main, an end-to-end test on real Kafka and PostgreSQL.
 
-Out of scope: реальные адаптеры провайдеров (3.2), роутер (3.4), mock-gateway как сервис
-(3.6, реализует формат вебхука), нормализация выплат (10.3), метрики Prometheus (0.7).
+Out of scope: real provider adapters (3.2), router (3.4), mock-gateway as a service
+(3.6, implements the webhook format), payout normalization (10.3), Prometheus metrics (0.7).
 
-## 3. Функциональные требования
+## 3. Functional requirements
 
-FR-1. Консьюмер: топик `gateway.webhooks.raw` и топики повторной доставки
+FR-1. Consumer: the topic `gateway.webhooks.raw` and the redelivery topics
 `.retry.5s/.retry.1m/.retry.10m` (kit Router), consumer group `KAFKA_CONSUMER_GROUP`
-(default `cbl-connector-webhooks`), ручной коммит офсетов после успешной обработки
-(`kafkaconsumer`), дедупликация по `(consumer, event_id)` через inbox. Ошибка обработки
-переводит сообщение в retry-топик, после исчерпания попыток - в `.dlq` с причиной
-в заголовке `x-error` (поведение kit Processor). Сообщение без `event_id` уходит в DLQ.
+(default `cbl-connector-webhooks`), manual offset commit after successful processing
+(`kafkaconsumer`), deduplication by `(consumer, event_id)` via inbox. A processing error
+moves the message to a retry topic, and after attempts are exhausted - to `.dlq` with the
+reason in the `x-error` header (kit Processor behavior). A message without `event_id` goes
+to DLQ.
 
-FR-2. Обработчик нормализации (`inbox.Handler`, выполняется в транзакции guard):
-- отклоняет конверт больше 512 КБ и тело вебхука больше 256 КБ до разбора: недоверенный
-  вход не должен раздувать retry/DLQ-сообщения и блокировать партицию (poison pill);
-- разбирает `GatewayWebhookRaw` из payload (ошибка разбора - `ErrInvalidWebhook`);
-- проверяет `signature_verified`: false - `ErrUnsignedWebhook` (в DLQ после retries);
-  граница с Webhook Ingress зафиксирована в T-CONNECTOR-01: подпись проверяет Ingress,
-  Connector доверяет флагу;
-- ищет декодер по `provider` в реестре; неизвестный провайдер - `ErrUnknownProvider`;
-- `decoder.Decode` возвращает `domain.CanonicalEvent`; событие валидируется:
-  `payment_id` - UUID, `gateway_id` и `provider` непустые printable ASCII до 128/64,
-  известный канонический тип, ненулевой `occurred_at`, `txid` до 256 (пусто допустимо),
-  `network` до 64 из charset кода (пусто допустимо), `received_amount` с активом 2 - 16
-  символов charset, decimals не больше 18, неотрицательная сумма; ошибки не интерполируют
-  недоверенные значения (текст ошибки и `x-error` остаются ограниченными);
-- собирает `CanonicalPaymentEvent` (`billing/events/v1`) и конверт outbox:
+FR-2. Normalization handler (`inbox.Handler`, executed in the guard transaction):
+- rejects an envelope larger than 512 KB and a webhook body larger than 256 KB before
+  parsing: untrusted input must not inflate retry/DLQ messages and block the partition
+  (poison pill);
+- parses `GatewayWebhookRaw` from the payload (parse error - `ErrInvalidWebhook`);
+- checks `signature_verified`: false - `ErrUnsignedWebhook` (to DLQ after retries);
+  the boundary with Webhook Ingress is fixed in T-CONNECTOR-01: Ingress verifies the
+  signature, Connector trusts the flag;
+- looks up the decoder by `provider` in the registry; unknown provider - `ErrUnknownProvider`;
+- `decoder.Decode` returns `domain.CanonicalEvent`; the event is validated:
+  `payment_id` - UUID, `gateway_id` and `provider` - non-empty printable ASCII up to 128/64,
+  a known canonical type, non-zero `occurred_at`, `txid` up to 256 (empty allowed),
+  `network` up to 64 from the code charset (empty allowed), `received_amount` with an asset
+  of 2 - 16 charset characters, decimals no more than 18, a non-negative amount; errors do
+  not interpolate untrusted values (the error text and `x-error` stay bounded);
+- builds `CanonicalPaymentEvent` (`billing/events/v1`) and the outbox envelope:
   topic `gateway.events.canonical`, key `payment_id`, event_type `gateway.payment.<type>`,
-  заголовки producer `cbl-connector`, schema_version `v1`, `provider`, `gateway_id` и
-  проброс `traceparent` из входящего конверта только при валидном формате W3C;
-  `occurred_at` - время события у провайдера;
-- записывает конверт в outbox в той же транзакции, что и inbox-запись: событие не
-  публикуется без отметки обработки и наоборот.
+  producer headers `cbl-connector`, schema_version `v1`, `provider`, `gateway_id` and
+  passthrough of `traceparent` from the incoming envelope only with a valid W3C format;
+  `occurred_at` is the event time at the provider;
+- writes the envelope to outbox in the same transaction as the inbox record: the event is
+  not published without the processing mark and vice versa.
 
-FR-3. Порт декодера и реестр:
+FR-3. Decoder port and registry:
 
 ```go
 type WebhookDecoder interface {
@@ -68,12 +70,12 @@ type WebhookDecoder interface {
 }
 ```
 
-Реестр строится из списка декодеров, дубликат провайдера - ошибка конфигурации;
-`Decoder(provider)` возвращает декодер и признак наличия. Порт покрывает платежные вебхуки:
-адаптеры 3.2 реализуют его, для payout-событий (10.3) появится отдельный порт/конвейер;
-реестр не зависит от конкретных провайдеров.
+The registry is built from the list of decoders, a duplicate provider is a configuration
+error; `Decoder(provider)` returns the decoder and a presence flag. The port covers payment
+webhooks: adapters 3.2 implement it, for payout events (10.3) a separate port/pipeline will
+appear; the registry does not depend on specific providers.
 
-FR-4. Sandbox-декодер (до KI-01): тело вебхука - JSON контракта:
+FR-4. Sandbox decoder (until KI-01): the webhook body is the JSON of the contract:
 
 ```json
 {
@@ -85,122 +87,125 @@ FR-4. Sandbox-декодер (до KI-01): тело вебхука - JSON кон
 }
 ```
 
-`status` переводится через `domain.CanonicalState` (псевдонимы провайдерских строк 3.1);
-пустой или длиннее 32 символов статус - `ErrInvalidWebhook`, неизвестный непустой -
-`ErrUnknownState`; `payment_id` обязан быть UUID; отсутствующие обязательные поля,
-отрицательная сумма, `event_ts` длиннее 64 символов или не парсируемый - `ErrInvalidWebhook`
-(текст ошибки не содержит входное значение). Провайдеры включаются env
-`CONNECTOR_SANDBOX_PROVIDERS` (default `mock`, пустой список - отказ старта);
-формат фиксируется и используется mock-gateway (3.6) как контракт sandbox-провайдера.
+`status` is translated via `domain.CanonicalState` (aliases of provider strings 3.1);
+an empty status or one longer than 32 characters - `ErrInvalidWebhook`, an unknown non-empty
+one - `ErrUnknownState`; `payment_id` must be a UUID; missing required fields, a negative
+amount, `event_ts` longer than 64 characters or unparsable - `ErrInvalidWebhook`
+(the error text does not contain the input value). Providers are enabled by the env
+`CONNECTOR_SANDBOX_PROVIDERS` (default `mock`, an empty list refuses startup);
+the format is fixed and used by mock-gateway (3.6) as the sandbox provider contract.
 
-FR-5. Ошибки домена: `ErrUnsignedWebhook`, `ErrUnknownProvider`, `ErrInvalidWebhook`
-(дополняют 3.1); mappping в gRPC не требуется: конвейер асинхронный, класс ошибки
-определяет retry/DLQ через inbox.
+FR-5. Domain errors: `ErrUnsignedWebhook`, `ErrUnknownProvider`, `ErrInvalidWebhook`
+(complement 3.1); mapping to gRPC is not required: the pipeline is asynchronous, the error
+class determines retry/DLQ via inbox.
 
-FR-6. Wiring (main): `PG_DSN` обязателен (inbox/outbox), миграции через `storagex`;
-при непустом `KAFKA_BROKERS` запускаются outbox relay (kit) и консьюмер нормализации;
-без Kafka сервис работает без пайплайна (WARN), как в 5.1. Остановка по SIGTERM:
-отмена контекста, закрытие консьюмера и publisher.
+FR-6. Wiring (main): `PG_DSN` is mandatory (inbox/outbox), migrations via `storagex`;
+with a non-empty `KAFKA_BROKERS` the outbox relay (kit) and the normalization consumer
+start; without Kafka the service works without the pipeline (WARN), as in 5.1. Shutdown on
+SIGTERM: context cancellation, closing the consumer and the publisher.
 
-FR-7. E2E: сквозной сценарий (сырой вебхук в Kafka -> канонический в Kafka, дедупликация,
-DLQ для неподписанного) выполняется на testcontainers с реальными Kafka и PostgreSQL
-(build tag `e2e`, прецедент CBL-5.1 раздел 9); compose-смоук (`test/e2e/smoke.ps1`):
-миграции применены, healthz ok, консьюмер запущен; топики создаются одноразовым сервисом
-`kafka-init` в compose (auto-create выключен).
+FR-7. E2E: the end-to-end scenario (raw webhook to Kafka -> canonical to Kafka,
+deduplication, DLQ for unsigned) runs on testcontainers with real Kafka and PostgreSQL
+(build tag `e2e`, precedent CBL-5.1 section 9); compose smoke (run instruction
+`test/e2e/E2E.md`, scenario E2E_Connector_Smoke, compose stand): migrations applied,
+healthz ok, consumer started; topics are created by the one-shot `kafka-init` service in
+compose (auto-create is disabled).
 
-## 4. Контракты
+## 4. Contracts
 
-- Kafka: `gateway.webhooks.raw` (вход, ключ `provider+gateway_id`, payload
-  `GatewayWebhookRaw`), `gateway.events.canonical` (выход, ключ `payment_id`, payload
-  `CanonicalPaymentEvent`); заголовки конверта из `CBL-003` (раздел 6); retry/DLQ-суффиксы
-  kit. `cbl-protos@cf-1` без изменений.
-- PostgreSQL `connector`: таблицы `outbox`, `inbox` (reference DDL из `cbl-kit`).
-- gRPC/HTTP: без изменений (ConnectorService - 3.2/3.4).
+- Kafka: `gateway.webhooks.raw` (input, key `provider+gateway_id`, payload
+  `GatewayWebhookRaw`), `gateway.events.canonical` (output, key `payment_id`, payload
+  `CanonicalPaymentEvent`); envelope headers from `CBL-003` (section 6); kit retry/DLQ
+  suffixes. `cbl-protos@cf-1` unchanged.
+- PostgreSQL `connector`: tables `outbox`, `inbox` (reference DDL from `cbl-kit`).
+- gRPC/HTTP: unchanged (ConnectorService - 3.2/3.4).
 
-## 5. Модель данных и миграции
+## 5. Data model and migrations
 
-`migrations/00001_outbox.sql`, `migrations/00002_inbox.sql` - копии reference DDL из
-`cbl-kit/migrations` (`CBL-003`, раздел 7). Схема адаптеров и маршрутов - 3.4.
+`migrations/00001_outbox.sql`, `migrations/00002_inbox.sql` - copies of the reference DDL
+from `cbl-kit/migrations` (`CBL-003`, section 7). The schema of adapters and routes - 3.4.
 
-## 6. Конечные автоматы и правила
+## 6. State machines and rules
 
-Состояния платежа ведет Payment (4.3); нормализатор не фильтрует повторные статусы и не
-переупорядочивает события: он пробрасывает `gateway_event_ts` провайдера, а контроль
-порядка (watermark по `gateway_event_ts` на платеж) - обязанность Payment (T-CONNECTOR-05,
-требование зеркалируется в спеку 4.3). Дедупликация повторной доставки одного raw-события -
-inbox по `event_id` (детерминированный UUIDv5 из 5.1), поэтому одно сырое событие дает
-ровно один конверт canonical.
+Payment drives the payment states (4.3); the normalizer does not filter repeated statuses
+and does not reorder events: it passes through the provider `gateway_event_ts`, while order
+control (a watermark by `gateway_event_ts` per payment) is Payment's responsibility
+(T-CONNECTOR-05, the requirement is mirrored in spec 4.3). Deduplication of redelivery of
+one raw event is done by inbox by `event_id` (a deterministic UUIDv5 from 5.1), so one raw
+event yields exactly one canonical envelope.
 
 ## 7. Edge cases
 
-Дубликат raw-события (тот же `event_id`) - пропуск без публикации; неподписанный вебхук -
-DLQ; неизвестный провайдер, неизвестный статус, битый protobuf/JSON, пустой или не-UUID
-`payment_id` - retry, затем DLQ; poison pill (гигантские `status`/`event_ts`/тело,
-конверт больше 512 КБ) отклоняется короткой ошибкой до парсинга, retry-сообщение остается
-доставляемым и уходит в DLQ, партиция не блокируется; `event_ts` в будущем (принимается,
-порядок решает Payment); пустой `txid` при detected; нулевые подтверждения; повторная
-публикация relay (at-least-once, дедуплицирует Payment); активы и суммы вне лимитов
-отклоняются валидацией (asset 2 - 16, decimals до 18, minor units неотрицательны).
+A duplicate raw event (the same `event_id`) - skipped without publication; an unsigned
+webhook - DLQ; an unknown provider, an unknown status, broken protobuf/JSON, an empty or
+non-UUID `payment_id` - retry, then DLQ; a poison pill (giant `status`/`event_ts`/body, an
+envelope larger than 512 KB) is rejected with a short error before parsing, the retry
+message remains deliverable and goes to DLQ, the partition is not blocked; `event_ts` in
+the future (accepted, Payment decides the order); an empty `txid` at detected; zero
+confirmations; repeated publication by the relay (at-least-once, Payment deduplicates);
+assets and amounts outside the limits are rejected by validation (asset 2 - 16, decimals
+up to 18, minor units non-negative).
 
-## 8. Нефункциональные требования
+## 8. Non-functional requirements
 
-- At-least-once без потерь: офсеты коммитятся после обработки; публикация только через
-  outbox (нет dual-write).
-- Обработка одного события не делает сетевых вызовов и укладывается в единицы
-  миллисекунд (без вызовов провайдера); бюджет и лаг - 14.1.
-- Логи не содержат сырых тел вебхуков и секретов; provider/gateway_id/payment_id в логах
-  допустимы.
-- Покрытие unit+integration не ниже 80%; денежные сценарии - на реальных PostgreSQL
-  и Kafka (testcontainers).
+- At-least-once without loss: offsets are committed after processing; publication only via
+  outbox (no dual-write).
+- Processing one event makes no network calls and fits into single-digit milliseconds
+  (no provider calls); budget and lag - 14.1.
+- Logs do not contain raw webhook bodies and secrets; provider/gateway_id/payment_id in
+  logs are allowed.
+- Unit+integration coverage is at least 80%; money scenarios - on real PostgreSQL and
+  Kafka (testcontainers).
 
-## 9. План тестов
+## 9. Test plan
 
-| Уровень | Сценарии |
+| Level | Scenarios |
 | :-- | :-- |
-| Smoke | `go build ./...`; compose: healthz, миграции, старт консьюмера (`test/e2e/smoke.ps1`) |
-| Unit | реестр (дубликат, поиск, отсутствие), sandbox-декодер (валидный JSON, псевдонимы статусов, битый JSON/ts, пустой payment_id, отрицательная сумма), валидация события |
-| Integration | testcontainers PostgreSQL: обработчик через inbox.Processor: канонический конверт в outbox, дубликат не публикуется, неподписанный/неизвестный/битый - ошибка для retry |
-| E2E | testcontainers Kafka+PostgreSQL (tag `e2e`): raw -> canonical, дедупликация, DLQ неподписанного |
+| Smoke | `go build ./...`; compose: healthz, migrations, consumer start (run instruction `test/e2e/E2E.md`, scenario E2E_Connector_Smoke, compose stand) |
+| Unit | registry (duplicate, lookup, absence), sandbox decoder (valid JSON, status aliases, broken JSON/ts, empty payment_id, negative amount), event validation |
+| Integration | testcontainers PostgreSQL: handler via inbox.Processor: canonical envelope in outbox, duplicate is not published, unsigned/unknown/broken - error for retry |
+| E2E | testcontainers Kafka+PostgreSQL (tag `e2e`): raw -> canonical, deduplication, DLQ of unsigned |
 | Load | 14.1 |
 
-## 10. План работ и коммит
+## 10. Work plan and commit
 
-1. Спека, тесты (unit + integration + e2e), затем реализация: ошибки домена, реестр,
-   normalizer, sandbox-декодер, миграции, wiring, compose, smoke-скрипт.
-2. Четыре ревью-прохода, AGENTS.md, линтеры, финальные прогоны.
-3. Коммит `CBL-3.5: нормализатор вебхуков в канонические события`; спека в том же коммите.
+1. Spec, tests (unit + integration + e2e), then implementation: domain errors, registry,
+   normalizer, sandbox decoder, migrations, wiring, compose, smoke script.
+2. Four review passes, AGENTS.md, linters, final runs.
+3. Commit `CBL-3.5: webhook normalizer into canonical events`; the spec in the same commit.
 
-## 11. Открытые вопросы и решения
+## 11. Open questions and decisions
 
-- ADR: до выбора провайдера (KI-01) реестр наполняется sandbox-декодером; реальные
-  декодеры - часть адаптеров 3.2, конвейер от них не зависит.
-- ADR: событие без `signature_verified=true` не нормализуется: неподписанный вебхук не
-  должен запускать денежные переходы; DLQ сохраняет сообщение для разбора.
-- ADR: недоверенный вход ограничен до парсинга (конверт 512 КБ, тело 256 КБ, длины и
-  charset полей, UUID payment_id): poison pill не блокирует партицию, x-error и логи
-  ограничены; усиление kit (усечение x-error, parking, задержки повторов) - KI-connector-05.
-- ADR: `producer` конверта не проверяется (KI-connector-06): граница доверия - ACL на
-  запись в `gateway.webhooks.raw` в задаче 0.5; риск зафиксирован.
-- Открытый вопрос: формат sandbox-вебхука фиксируется здесь; 3.6 реализует отправку,
-  расхождения допустимы только через обновление спеки.
-- Открытый вопрос: real-provider маппинг gateway_id -> payment_id в адаптере (3.2) может
-  отличаться от sandbox (payment_id в теле); контракт порта это допускает.
-- Открытый вопрос: Schema Registry не подключен (платформенное отставание 0.5): события
-  публикуются plain protobuf, как и в 5.1; согласование с Payment (4.3) - вход волны W2.
-- Принято с ограничением: при нескольких репликах каждая запускает свой relay; порядок
-  событий одного платежа может нарушиться, Payment дедуплицирует и контролирует порядок
-  (T-CONNECTOR-05); один relay на outbox - кандидат 14.2.
+- ADR: until the provider is selected (KI-01) the registry is populated with the sandbox
+  decoder; real decoders are part of adapters 3.2, the pipeline does not depend on them.
+- ADR: an event without `signature_verified=true` is not normalized: an unsigned webhook
+  must not trigger money transitions; DLQ keeps the message for analysis.
+- ADR: untrusted input is bounded before parsing (envelope 512 KB, body 256 KB, field
+  lengths and charset, UUID payment_id): a poison pill does not block the partition,
+  x-error and logs are bounded; kit hardening (x-error truncation, parking, retry delays) -
+  KI-connector-05.
+- ADR: the envelope `producer` is not checked (KI-connector-06): the trust boundary is the
+  ACL for writing to `gateway.webhooks.raw` in task 0.5; the risk is recorded.
+- Open question: the sandbox webhook format is fixed here; 3.6 implements sending,
+  discrepancies are allowed only via a spec update.
+- Open question: real-provider mapping gateway_id -> payment_id in the adapter (3.2) may
+  differ from sandbox (payment_id in the body); the port contract allows this.
+- Open question: Schema Registry is not connected (platform backlog 0.5): events are
+  published as plain protobuf, as in 5.1; alignment with Payment (4.3) - W2 wave input.
+- Accepted with a limitation: with several replicas each runs its own relay; the order of
+  events of one payment may be broken, Payment deduplicates and controls the order
+  (T-CONNECTOR-05); one relay per outbox - a 14.2 candidate.
 
-## 12. Ревью (CBL-001, шаг 6)
+## 12. Review (CBL-001, step 6)
 
-Четыре независимых прохода (14.10.2026). Blocker безопасности (poison pill с гигантскими
-`status`/`event_ts` блокировал партицию бесконечной редоставкой) закрыт лимитами
-недоверенного входа и санитизацией ошибок; e2e дополнен poison-pill сценарием. Все major
-и minor закрыты или зафиксированы.
+Four independent passes (14.10.2026). The security blocker (a poison pill with giant
+`status`/`event_ts` blocked the partition with endless redelivery) is closed with untrusted
+input limits and error sanitization; e2e is extended with a poison-pill scenario. All
+majors and minors are closed or recorded.
 
-| Роль | Ключевые замечания | Закрытие |
+| Role | Key findings | Closure |
 | :-- | :-- | :-- |
-| Без контекста | нет предела длины актива; дедупликация проверялась только негативным ожиданием; не покрыты future event_ts/пустой txid/битый protobuf; smoke без положительной проверки миграций; журнал опережал ревью; пустой список провайдеров; nil-реестр | лимиты и charset полей в Validate; e2e утверждает count outbox/inbox в БД; добавлены кейсы (пустой статус, длинные поля, poison); smoke проверяет `successfully migrated`; статусы синхронизированы; пустой список - отказ старта; требование к registry задокументировано |
-| Архитектуры | монотонность occurred_at не реализована; retry без задержки выгружает бэклог в DLQ; os.Exit и graceful shutdown; readyz всегда 200; выплатный порт в декодере; несколько relay и порядок; отсутствие event_type ломает retry; Schema Registry | T-CONNECTOR-05: порядок - обязанность Payment (4.3); T-CONNECTOR-04 переформулирован честно, задержки/парковка - 14.2; exit/shutdown/readyz - платформенные задачи 0.7/14.4; FR-3 ограничена платежными вебхуками, payout-порт - 10.3; ограничение relay зафиксировано; kit-замечания в KI-connector-05; SR - 0.5 |
-| С контекстом | заголовок trade-offs не совпадал со строками; KI-connector-04 неточен; дубль package-комментария; `%v` вместо `%w`; пустой status = ErrUnknownState; глобальный compose не ждал kafka-init | таблица приведена к 5 колонкам; KI уточнен; комментарий убран; `%w`; пустой status - ErrInvalidWebhook; глобальный compose ждет kafka-init |
-| Безопасности (BLOCK снят) | poison pill блокирует партицию (гигантские поля в x-error); нет лимитов полей/формата payment_id; Kafka PLAINTEXT без ACL доверяет signature_verified; traceparent без валидации; retention DLQ | лимиты конверта/тела/полей, UUID payment_id, короткие ошибки без значений; e2e poison-pill сценарий подтверждает разблокировку; KI-connector-06 (ACL/SASL - 0.5); валидация W3C traceparent; KI-connector-04 (retention) |
+| Without context | no asset length limit; deduplication was tested only with a negative expectation; future event_ts/empty txid/broken protobuf are not covered; smoke without a positive migration check; the journal was ahead of the review; an empty provider list; a nil registry | field limits and charset in Validate; e2e asserts the outbox/inbox count in the DB; cases added (empty status, long fields, poison); smoke checks `successfully migrated`; statuses synchronized; an empty list refuses startup; the registry requirement is documented |
+| Architecture | occurred_at monotonicity is not implemented; retry without delay dumps the backlog into DLQ; os.Exit and graceful shutdown; readyz always 200; a payout port in the decoder; several relays and ordering; a missing event_type breaks retry; Schema Registry | T-CONNECTOR-05: ordering is Payment's responsibility (4.3); T-CONNECTOR-04 reformulated honestly, delays/parking - 14.2; exit/shutdown/readyz - platform tasks 0.7/14.4; FR-3 is limited to payment webhooks, payout port - 10.3; the relay limitation is recorded; kit findings in KI-connector-05; SR - 0.5 |
+| With context | the trade-offs header did not match the rows; KI-connector-04 is inaccurate; a duplicate package comment; `%v` instead of `%w`; empty status = ErrUnknownState; the global compose did not wait for kafka-init | the table is reduced to 5 columns; KI refined; the comment removed; `%w`; empty status - ErrInvalidWebhook; the global compose waits for kafka-init |
+| Security (BLOCK lifted) | the poison pill blocks the partition (giant fields in x-error); no field/format limits for payment_id; Kafka PLAINTEXT without ACL trusts signature_verified; traceparent without validation; DLQ retention | envelope/body/field limits, UUID payment_id, short errors without values; the e2e poison-pill scenario confirms unblocking; KI-connector-06 (ACL/SASL - 0.5); W3C traceparent validation; KI-connector-04 (retention) |

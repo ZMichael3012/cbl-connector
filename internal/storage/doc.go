@@ -1,3 +1,3 @@
-// Пакет storage содержит доступ к хранилищам сервиса connector:
-// GORM-репозитории, миграции и интеграцию с outbox/inbox.
+// Package storage contains the storage access of the connector service:
+// GORM repositories, migrations and outbox/inbox integration.
 package storage

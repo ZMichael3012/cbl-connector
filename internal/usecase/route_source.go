@@ -11,34 +11,34 @@ import (
 	"github.com/cbl/cbl-connector/internal/domain"
 )
 
-// Пределы TTL кеша конфигурации маршрутов: CBL-003 (раздел 7) фиксирует
-// для route:config диапазон 30 - 60 с.
+// TTL bounds of the route configuration cache: CBL-003 (section 7) fixes
+// the 30 - 60 s range for route:config.
 const (
 	defaultRouteCacheTTL = 30 * time.Second
 	minRouteCacheTTL     = 30 * time.Second
 	maxRouteCacheTTL     = 60 * time.Second
 )
 
-// RouteRulesStore хранит правила маршрутизации (источник истины).
+// RouteRulesStore stores the routing rules (source of truth).
 type RouteRulesStore interface {
-	// LoadEnabled возвращает включенные правила.
+	// LoadEnabled returns the enabled rules.
 	LoadEnabled(ctx context.Context) ([]domain.RouteRule, error)
-	// Save заменяет конфигурацию правил целиком.
+	// Save replaces the whole rule configuration.
 	Save(ctx context.Context, rules []domain.RouteRule) error
 }
 
-// RouteConfigCacheStore кеширует конфигурацию правил.
+// RouteConfigCacheStore caches the rule configuration.
 type RouteConfigCacheStore interface {
-	// Get возвращает конфигурацию из кеша; miss - ok=false.
+	// Get returns the configuration from the cache; a miss is ok=false.
 	Get(ctx context.Context) ([]domain.RouteRule, bool, error)
-	// Set сохраняет конфигурацию с TTL.
+	// Set stores the configuration with a TTL.
 	Set(ctx context.Context, rules []domain.RouteRule, ttl time.Duration) error
-	// Invalidate удаляет конфигурацию из кеша.
+	// Invalidate removes the configuration from the cache.
 	Invalidate(ctx context.Context) error
 }
 
-// NormalizeRouteCacheTTL приводит TTL к диапазону 30 - 60 с (CBL-003),
-// некорректное значение заменяет значением по умолчанию.
+// NormalizeRouteCacheTTL clamps the TTL to the 30 - 60 s range (CBL-003)
+// and replaces an invalid value with the default.
 func NormalizeRouteCacheTTL(ttl time.Duration) time.Duration {
 	switch {
 	case ttl <= 0:
@@ -52,7 +52,7 @@ func NormalizeRouteCacheTTL(ttl time.Duration) time.Duration {
 	}
 }
 
-// RouteCacheTTLFromEnv читает CONNECTOR_ROUTE_CACHE_TTL с клэмпами.
+// RouteCacheTTLFromEnv reads CONNECTOR_ROUTE_CACHE_TTL with clamping.
 func RouteCacheTTLFromEnv(getenv func(string) string) time.Duration {
 	raw := getenv("CONNECTOR_ROUTE_CACHE_TTL")
 	if raw == "" {
@@ -65,8 +65,8 @@ func RouteCacheTTLFromEnv(getenv func(string) string) time.Duration {
 	return NormalizeRouteCacheTTL(ttl)
 }
 
-// CachedRouteRules читает правила через Redis-кеш со фолбэком на хранилище:
-// источник истины - PostgreSQL, сбой кеша не влияет на выбор (T-02, T-11).
+// CachedRouteRules reads the rules through the Redis cache with a fallback to storage:
+// the source of truth is PostgreSQL, a cache failure does not affect selection (T-02, T-11).
 type CachedRouteRules struct {
 	store RouteRulesStore
 	cache RouteConfigCacheStore
@@ -74,7 +74,7 @@ type CachedRouteRules struct {
 	log   *zap.Logger
 }
 
-// NewCachedRouteRules создает источник правил с кешем.
+// NewCachedRouteRules creates the rule source with a cache.
 func NewCachedRouteRules(store RouteRulesStore, cache RouteConfigCacheStore, ttl time.Duration, log *zap.Logger) *CachedRouteRules {
 	if log == nil {
 		log = zap.NewNop()
@@ -87,9 +87,9 @@ func NewCachedRouteRules(store RouteRulesStore, cache RouteConfigCacheStore, ttl
 	}
 }
 
-// Load возвращает правила из кеша или из хранилища (cache-aside).
-// Кеш не является источником истины: семантически некорректный payload
-// (например, обнуленный вес) считается промахом и не доходит до роутера.
+// Load returns the rules from the cache or from storage (cache-aside).
+// The cache is not the source of truth: a semantically invalid payload
+// (for example, a zeroed weight) counts as a miss and never reaches the router.
 func (s *CachedRouteRules) Load(ctx context.Context) ([]domain.RouteRule, error) {
 	if s.cache != nil {
 		cached, ok, err := s.cache.Get(ctx)
@@ -117,21 +117,21 @@ func (s *CachedRouteRules) Load(ctx context.Context) ([]domain.RouteRule, error)
 	return rules, nil
 }
 
-// Save заменяет правила в хранилище и инвалидирует кеш.
+// Save replaces the rules in storage and invalidates the cache.
 func (s *CachedRouteRules) Save(ctx context.Context, rules []domain.RouteRule) error {
 	if err := s.store.Save(ctx, rules); err != nil {
 		return err
 	}
 	if s.cache != nil {
 		if err := s.cache.Invalidate(ctx); err != nil {
-			// TTL ограничит устаревание даже при сбое инвалидации.
+			// The TTL bounds staleness even when invalidation fails.
 			s.log.Warn("route config cache invalidate failed", zap.Error(err))
 		}
 	}
 	return nil
 }
 
-// rulesValid проверяет, что все правила проходят доменную валидацию.
+// rulesValid checks that every rule passes domain validation.
 func rulesValid(rules []domain.RouteRule) bool {
 	for i := range rules {
 		if err := rules[i].Validate(); err != nil {

@@ -12,25 +12,25 @@ import (
 	"github.com/cbl/cbl-connector/internal/domain"
 )
 
-// routeConfigKey задает ключ кеша конфигурации маршрутов (CBL-003, раздел 7).
+// routeConfigKey specifies the route configuration cache key (CBL-003, section 7).
 const routeConfigKey = "route:config"
 
-// routeConfigPayload описывает JSON-значение кеша конфигурации маршрутов.
+// routeConfigPayload describes the JSON value of the route configuration cache.
 type routeConfigPayload struct {
 	Rules []domain.RouteRule `json:"rules"`
 }
 
-// RouteConfigCache кеширует конфигурацию правил в Redis с TTL.
+// RouteConfigCache caches the rule configuration in Redis with a TTL.
 type RouteConfigCache struct {
 	client *redis.Client
 }
 
-// NewRouteConfigCache создает кеш конфигурации маршрутов.
+// NewRouteConfigCache creates the route configuration cache.
 func NewRouteConfigCache(client *redis.Client) *RouteConfigCache {
 	return &RouteConfigCache{client: client}
 }
 
-// Get возвращает конфигурацию из кеша; miss и битый JSON - ok=false.
+// Get returns the configuration from the cache; a miss and broken JSON are ok=false.
 func (c *RouteConfigCache) Get(ctx context.Context) ([]domain.RouteRule, bool, error) {
 	raw, err := c.client.Get(ctx, routeConfigKey).Bytes()
 	if errors.Is(err, redis.Nil) {
@@ -41,13 +41,13 @@ func (c *RouteConfigCache) Get(ctx context.Context) ([]domain.RouteRule, bool, e
 	}
 	var payload routeConfigPayload
 	if err := json.Unmarshal(raw, &payload); err != nil {
-		// Поврежденное значение кеша не должно ломать выбор: считаем промахом.
+		// A corrupted cache value must not break selection: treat it as a miss.
 		return nil, false, nil
 	}
 	return payload.Rules, true, nil
 }
 
-// Set сохраняет конфигурацию в кеше с TTL.
+// Set stores the configuration in the cache with a TTL.
 func (c *RouteConfigCache) Set(ctx context.Context, rules []domain.RouteRule, ttl time.Duration) error {
 	raw, err := json.Marshal(routeConfigPayload{Rules: rules})
 	if err != nil {
@@ -59,7 +59,7 @@ func (c *RouteConfigCache) Set(ctx context.Context, rules []domain.RouteRule, tt
 	return nil
 }
 
-// Invalidate удаляет конфигурацию из кеша.
+// Invalidate removes the configuration from the cache.
 func (c *RouteConfigCache) Invalidate(ctx context.Context) error {
 	if err := c.client.Del(ctx, routeConfigKey).Err(); err != nil {
 		return fmt.Errorf("storage: invalidate route config: %w", err)

@@ -1,4 +1,4 @@
-// Пакет usecase: сценарии указаны в doc.go.
+// Package usecase: the use cases are specified in doc.go.
 package usecase
 
 import (
@@ -12,21 +12,21 @@ import (
 	"github.com/cbl/cbl-connector/internal/domain"
 )
 
-// WebhookDecoder переводит сырой вебхук провайдера в каноническое событие.
-// Реализации предоставляют адаптеры провайдеров (3.2, 10.3) и sandbox-декодер.
+// WebhookDecoder converts a raw provider webhook into a canonical event.
+// Implementations are provided by provider adapters (3.2, 10.3) and the sandbox decoder.
 type WebhookDecoder interface {
-	// Provider задает имя провайдера, за который отвечает декодер.
+	// Provider returns the name of the provider served by the decoder.
 	Provider() string
-	// Decode разбирает тело вебхука и возвращает каноническое событие.
+	// Decode parses the webhook body and returns the canonical event.
 	Decode(ctx context.Context, raw *eventsv1.GatewayWebhookRaw) (domain.CanonicalEvent, error)
 }
 
-// DecoderRegistry хранит декодеры по имени провайдера.
+// DecoderRegistry stores decoders by provider name.
 type DecoderRegistry struct {
 	decoders map[string]WebhookDecoder
 }
 
-// NewDecoderRegistry создает реестр; дубликат или пустое имя провайдера - ошибка конфигурации.
+// NewDecoderRegistry creates the registry; a duplicate or empty provider name is a configuration error.
 func NewDecoderRegistry(decoders ...WebhookDecoder) (*DecoderRegistry, error) {
 	registry := &DecoderRegistry{decoders: make(map[string]WebhookDecoder, len(decoders))}
 	for _, decoder := range decoders {
@@ -45,7 +45,7 @@ func NewDecoderRegistry(decoders ...WebhookDecoder) (*DecoderRegistry, error) {
 	return registry, nil
 }
 
-// Decoder возвращает декодер провайдера; поиск не зависит от регистра.
+// Decoder returns the provider decoder; the lookup is case-insensitive.
 func (r *DecoderRegistry) Decoder(provider string) (WebhookDecoder, bool) {
 	decoder, ok := r.decoders[strings.ToLower(strings.TrimSpace(provider))]
 	return decoder, ok

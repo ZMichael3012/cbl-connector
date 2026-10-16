@@ -21,34 +21,34 @@ import (
 	"github.com/cbl/cbl-connector/internal/domain"
 )
 
-// Топики и идентификаторы конвейера нормализации.
+// Topics and identifiers of the normalization pipeline.
 const (
-	// TopicGatewayWebhooksRaw задает топик сырых вебхуков провайдера.
+	// TopicGatewayWebhooksRaw specifies the topic of raw provider webhooks.
 	TopicGatewayWebhooksRaw = "gateway.webhooks.raw"
-	// TopicGatewayEventsCanonical задает топик канонических событий шлюза.
+	// TopicGatewayEventsCanonical specifies the topic of canonical gateway events.
 	TopicGatewayEventsCanonical = "gateway.events.canonical"
-	// ProducerConnector задает имя продюсера в конверте событий.
+	// ProducerConnector specifies the producer name in the event envelope.
 	ProducerConnector = "cbl-connector"
-	// schemaVersion задает версию схемы канонического события.
+	// schemaVersion specifies the schema version of the canonical event.
 	schemaVersion = "v1"
-	// maxRawMessageBytes ограничивает размер входящего конверта: недоверенный
-	// вход не должен раздувать retry/DLQ-сообщения и блокировать партицию.
+	// maxRawMessageBytes limits the size of the incoming envelope: untrusted
+	// input must not inflate retry/DLQ messages or block the partition.
 	maxRawMessageBytes = 512 << 10
 )
 
-// traceparentPattern проверяет формат W3C trace context перед пробросом.
+// traceparentPattern validates the W3C trace context format before propagation.
 var traceparentPattern = regexp.MustCompile(`^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$`)
 
-// Normalizer нормализует сырые вебхуки в канонические события через outbox.
-// Реализует inbox.Handler: вызывается в транзакции guard, поэтому конверт
-// публикуется атомарно с отметкой обработки.
+// Normalizer turns raw webhooks into canonical events through the outbox.
+// It implements inbox.Handler: it is called inside the guard transaction, so the
+// envelope is published atomically with the processing mark.
 type Normalizer struct {
 	registry *DecoderRegistry
 	store    *outbox.Store
 	log      *zap.Logger
 }
 
-// NewNormalizer создает Normalizer поверх реестра декодеров.
+// NewNormalizer creates a Normalizer on top of the decoder registry.
 func NewNormalizer(registry *DecoderRegistry, log *zap.Logger) *Normalizer {
 	if log == nil {
 		log = zap.NewNop()
@@ -56,9 +56,9 @@ func NewNormalizer(registry *DecoderRegistry, log *zap.Logger) *Normalizer {
 	return &Normalizer{registry: registry, store: outbox.NewStore(), log: log}
 }
 
-// Handle разбирает сырой вебхук, декодирует его и пишет каноническое событие в outbox.
-// Неподписанный вебхук, неизвестный провайдер и битые тела возвращают ошибку:
-// inbox Processor отправит сообщение в retry-топик, затем в DLQ.
+// Handle parses a raw webhook, decodes it and writes the canonical event to the outbox.
+// An unsigned webhook, an unknown provider and broken bodies return an error:
+// the inbox Processor sends the message to the retry topic and then to the DLQ.
 func (n *Normalizer) Handle(ctx context.Context, tx *gorm.DB, msg inbox.Message) error {
 	if len(msg.Value) > maxRawMessageBytes {
 		return fmt.Errorf("%w: raw message too large", domain.ErrInvalidWebhook)
@@ -98,8 +98,8 @@ func (n *Normalizer) Handle(ctx context.Context, tx *gorm.DB, msg inbox.Message)
 	return nil
 }
 
-// buildCanonicalEnvelope собирает конверт канонического события: ключ партиции
-// payment_id (CBL-003), occurred_at - время события у провайдера для монотонности.
+// buildCanonicalEnvelope builds the canonical event envelope: the partition key is
+// payment_id (CBL-003), occurred_at is the provider event time for monotonicity.
 func buildCanonicalEnvelope(event domain.CanonicalEvent, incoming map[string]string) (outbox.Envelope, error) {
 	payload, err := proto.Marshal(&eventsv1.CanonicalPaymentEvent{
 		PaymentId: event.PaymentID,
@@ -137,8 +137,8 @@ func buildCanonicalEnvelope(event domain.CanonicalEvent, incoming map[string]str
 	return envelope, nil
 }
 
-// canonicalEventType переводит доменный статус в enum proto;
-// неизвестные значения не должны доходить сюда после Validate.
+// canonicalEventType maps the domain state to the proto enum;
+// unknown values must not reach this point after Validate.
 func canonicalEventType(state domain.State) eventsv1.CanonicalPaymentEventType {
 	switch state {
 	case domain.StateDetected:

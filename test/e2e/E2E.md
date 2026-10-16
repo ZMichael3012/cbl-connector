@@ -14,7 +14,7 @@ normalizer end-to-end scenario with poison-pill cases runs separately on testcon
 
 | Scenario | Checks | Contracts |
 | :-- | :-- | :-- |
-| `E2E_Connector_Smoke` | compose stand up, goose migrations applied (success log line, no failure line), `webhook normalizer started`, healthz/readyz | CBL-3.5 pipeline start, administrative endpoints |
+| `E2E_Connector_Smoke` | compose stand up, goose migrations applied (success log line, no failure line), `webhook normalizer started`, healthz/readyz, the admin contour answers `GetRoutingRules` (revision 0) | CBL-3.5 pipeline start, administrative endpoints, `ConnectorAdminService` (CBL-12.2) |
 
 ## 2. Isolation and parallelism
 
@@ -53,7 +53,12 @@ normalizer end-to-end scenario with poison-pill cases runs separately on testcon
    `successfully migrated database to version` and does not contain
    `apply migrations failed`.
 4. Pipeline: `connector-logs.txt` contains `webhook normalizer started`.
-5. Checks go to `smoke-checks.txt`.
+5. Admin contour (CBL-12.2): the gRPC server answers the routing read -
+   `docker run --rm --network <project>_cbl-net -v <repo>/../cbl-protos/proto:/p fullstorydev/grpcurl:v1.9.1 -plaintext -import-path /p -proto billing/connector/v1/connector.proto -d {} connector:9050 billing.connector.v1.ConnectorAdminService/GetRoutingRules`
+   -> a fresh configuration renders as `{}` (protojson omits zero values: revision 0
+   and an empty item list); the check parses the JSON and treats the absent revision
+   as 0.
+6. Checks go to `smoke-checks.txt`.
 
 ## 5. Mandatory run artifacts
 

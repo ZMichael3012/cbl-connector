@@ -4,6 +4,7 @@ package storage_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -156,11 +157,12 @@ func TestIntegrationRouteConfigCache(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, ok, "an empty cache is a miss")
 
-	require.NoError(t, cache.Set(ctx, defaultRules(), time.Minute))
-	rules, ok, err := cache.Get(ctx)
+	snapshot := domain.RouteConfigSnapshot{Rules: defaultRules(), Disabled: []string{"muted"}}
+	require.NoError(t, cache.Set(ctx, snapshot, time.Minute))
+	got, ok, err := cache.Get(ctx)
 	require.NoError(t, err)
 	require.True(t, ok)
-	assert.Equal(t, defaultRules(), rules)
+	assert.Equal(t, snapshot, got, "rules and the disabled set round-trip")
 
 	require.NoError(t, cache.Invalidate(ctx))
 	_, ok, err = cache.Get(ctx)
@@ -222,4 +224,152 @@ func TestIntegrationCachedRouteRulesRedisDown(t *testing.T) {
 	rules, err := source.Load(ctx)
 	require.NoError(t, err, "a Redis failure does not break rule loading")
 	assert.Len(t, rules, 2)
+}
+
+func TestIntegrationAdminRevisionFlow(t *testing.T) {
+	db := setupConnectorDB(t)
+	repo := storage.NewRouteRulesRepository(db)
+	ctx := context.Background()
+
+	revision, err := repo.Revision(ctx)
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, revision, "a fresh configuration starts at revision 0")
+
+	revision, err = repo.ReplaceWithRevision(ctx, 0, defaultRules())
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, revision)
+
+	all, err := repo.LoadAll(ctx)
+	require.NoError(t, err)
+	assert.Len(t, all, 3, "the admin read includes disabled rules")
+	stored, err := repo.Revision(ctx)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, stored)
+
+	// A stale revision conflicts and leaves the configuration untouched.
+	_, err = repo.ReplaceWithRevision(ctx, 0, []domain.RouteRule{{Provider: "other", Weight: 1, Enabled: true}})
+	require.ErrorIs(t, err, domain.ErrRouteRevisionConflict)
+	all, err = repo.LoadAll(ctx)
+	require.NoError(t, err)
+	assert.Len(t, all, 3, "a conflict writes nothing")
+
+	// Concurrent replacements with the same expected revision: exactly one wins.
+	results := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func(n int) {
+			_, replaceErr := repo.ReplaceWithRevision(ctx, 1, []domain.RouteRule{{Provider: "winner", Weight: 1, Enabled: true}})
+			results <- replaceErr
+		}(i)
+	}
+	successes, conflicts := 0, 0
+	for i := 0; i < 2; i++ {
+		switch err := <-results; {
+		case err == nil:
+			successes++
+		case errors.Is(err, domain.ErrRouteRevisionConflict):
+			conflicts++
+		default:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	assert.Equal(t, 1, successes)
+	assert.Equal(t, 1, conflicts)
+}
+
+func TestIntegrationDisableProvider(t *testing.T) {
+	db := setupConnectorDB(t)
+	repo := storage.NewRouteRulesRepository(db)
+	ctx := context.Background()
+
+	require.NoError(t, repo.Save(ctx, defaultRules()))
+	names, err := repo.ProviderNames(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"disabled", "fallback", "sandbox"}, names, "distinct providers, sorted")
+
+	already, err := repo.DisableProvider(ctx, "sandbox", "maintenance")
+	require.NoError(t, err)
+	assert.False(t, already)
+	already, err = repo.DisableProvider(ctx, "sandbox", "again")
+	require.NoError(t, err)
+	assert.True(t, already, "the repeat is idempotent")
+
+	disabled, err := repo.ListDisabled(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"sandbox"}, disabled)
+}
+
+func TestIntegrationAdminUsecaseDisableFiltersRules(t *testing.T) {
+	db := setupConnectorDB(t)
+	client := setupRedis(t)
+	ctx := context.Background()
+
+	repo := storage.NewRouteRulesRepository(db)
+	cache := storage.NewRouteConfigCache(client)
+	source := usecase.NewCachedRouteRules(repo, cache, time.Minute, zap.NewNop())
+	admin := usecase.NewAdminRouting(repo, source, nil, zap.NewNop())
+
+	require.NoError(t, repo.Save(ctx, defaultRules()))
+	warm, err := source.Load(ctx)
+	require.NoError(t, err)
+	require.Len(t, warm, 2, "the cache is warmed with both active rules")
+
+	already, err := admin.DisableProvider(ctx, "sandbox", "maintenance")
+	require.NoError(t, err)
+	assert.False(t, already)
+
+	active, err := source.Load(ctx)
+	require.NoError(t, err)
+	assert.Len(t, active, 1)
+	assert.Equal(t, "fallback", active[0].Provider, "the disabled provider disappears from the rule source")
+
+	// The admin read still shows the full configuration (the operator can edit it).
+	_, all, err := admin.GetRules(ctx)
+	require.NoError(t, err)
+	assert.Len(t, all, 3)
+}
+
+// TestIntegrationAdminDisableSurvivesRuleReplacement verifies the review
+// finding: a repeated disable of a provider whose rules were replaced stays
+// idempotent (the disabled set keeps the provider known).
+func TestIntegrationAdminDisableSurvivesRuleReplacement(t *testing.T) {
+	db := setupConnectorDB(t)
+	ctx := context.Background()
+
+	repo := storage.NewRouteRulesRepository(db)
+	admin := usecase.NewAdminRouting(repo, nil, nil, zap.NewNop())
+
+	require.NoError(t, repo.Save(ctx, defaultRules()))
+	already, err := admin.DisableProvider(ctx, "sandbox", "maintenance")
+	require.NoError(t, err)
+	assert.False(t, already)
+
+	// Replace the rules without the disabled provider.
+	revision, _, err := admin.GetRules(ctx)
+	require.NoError(t, err)
+	_, _, err = admin.PutRules(ctx, revision, []domain.RouteRule{{Provider: "fallback", Weight: 1, Enabled: true}})
+	require.NoError(t, err)
+
+	already, err = admin.DisableProvider(ctx, "sandbox", "")
+	require.NoError(t, err, "the disabled provider stays known")
+	assert.True(t, already)
+}
+
+func TestIntegrationAdminUsecasePutRevision(t *testing.T) {
+	db := setupConnectorDB(t)
+	repo := storage.NewRouteRulesRepository(db)
+	ctx := context.Background()
+	admin := usecase.NewAdminRouting(repo, nil, nil, zap.NewNop())
+
+	revision, stored, err := admin.PutRules(ctx, 0, defaultRules())
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, revision)
+	assert.Len(t, stored, 3)
+
+	_, _, err = admin.PutRules(ctx, 0, defaultRules())
+	require.ErrorIs(t, err, domain.ErrRouteRevisionConflict)
+
+	revision, all, err := admin.GetRules(ctx)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, revision)
+	assert.Len(t, all, 3)
 }

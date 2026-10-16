@@ -26,4 +26,11 @@ var (
 	ErrProviderOverloaded = errors.New("connector: provider overloaded")
 	// ErrInvalidGatewayRequest reports an invalid gateway request (caller bug).
 	ErrInvalidGatewayRequest = errors.New("connector: invalid gateway request")
+	// ErrInvalidAdminInput reports an invalid administrative input (CBL-12.2).
+	ErrInvalidAdminInput = errors.New("connector: invalid admin input")
+	// ErrRouteRevisionConflict reports a routing configuration revision mismatch:
+	// another operator replaced the configuration since the last read (CBL-12.2).
+	ErrRouteRevisionConflict = errors.New("connector: routing revision conflict")
+	// ErrProviderNotFound reports a provider unknown to the registry and the rules.
+	ErrProviderNotFound = errors.New("connector: provider not found")
 )

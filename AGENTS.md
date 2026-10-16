@@ -16,10 +16,12 @@ Out of scope: other platform services; interaction only via `cbl-protos` contrac
 ## 2. Contracts
 
 - REST: administrative /healthz, /readyz
-- gRPC: ConnectorService server; outbound HTTPS to gateways
+- gRPC: ConnectorService server; ConnectorAdminService server (routing configuration
+  and manual provider disable, CBL-12.2, cf-3.7); outbound HTTPS to gateways
 - Kafka produces: gateway.events.canonical, gateway.payout.events
 - Kafka consumes: gateway.webhooks.raw, payout.commands
-- Storage: PostgreSQL connector, Redis (routes, circuit breaker)
+- Storage: PostgreSQL connector (`routing_rules`, `routing_config` revision,
+  `disabled_providers`), Redis (routes, circuit breaker)
 
 Contracts are frozen in `cbl-protos` (CF-1 for gRPC, CF-2/CF-3 for events), see `CBL-004`.
 
@@ -93,8 +95,9 @@ consumer lag; dashboards after task 0.7.
 | T-CONNECTOR-05 | Event order by `gateway_event_ts` is controlled by Payment (4.3), the normalizer only passes the time through | no ordering state in the connector | on retry an event may be published late | the requirement is mirrored in the Payment spec 4.3; the payment_id partition key preserves the order of one payment in the normal case |
 | T-CONNECTOR-06 | Circuit breaker is in-process (gobreaker per provider), the `cb:{provider}` key is reserved | no Redis on the money path, state loss is safe, no false shared trips under partial degradation | with I replicas the effective trip threshold grows proportionally, half-open probes multiply | consolidate shared state when a multi-instance requirement appears (KI-connector-07); thresholds are configurable |
 | T-CONNECTOR-07 | Only temporary failures and timeouts count as a breaker failure; business rejections and caller cancellation are not counted; an empty `idempotency_key` is fail-fast; configuration is normalized with clamps | a stream of rejected addresses and caller bugs do not block a healthy provider; a retry does not create a second invoice/payout; "insane" env values do not disable protection | adapters must classify errors (`ErrTemporary`/`ErrRejected`) and sanitize their text | classification and mapping are fixed in CBL-3.3 (§4) and CBL-003; contract tests of classification - 3.7 |
-| T-CONNECTOR-08 | Routing rules: the source of truth is PostgreSQL, Redis `route:config` is a cache with a 30 - 60 s TTL and a fallback; a semantically corrupted payload (weight 0) counts as a miss | a Redis failure does not affect selection; cache poisoning does not reach the router (validation + weight guard) | rules from the cache require read-time validation; the 12.x admin path does not exist yet | KI-connector-08; defense-in-depth guard in the router; TTL bounds staleness |
-| T-CONNECTOR-09 | Concurrent rule `Save` operations are serialized by an advisory lock; the cache staleness window during a Load/Save race is bounded by TTL (≤ 60 s); a half-open provider participates in selection again, excess probes are rejected | replace-all without merging configurations; provider recovery without manual intervention | automatic failover to another provider is not performed; staleness window up to 60 s | failover is a separate task after 3.2; the admin path will add a configuration version |
+| T-CONNECTOR-08 | Routing rules: the source of truth is PostgreSQL, Redis `route:config` is a cache with a 30 - 60 s TTL and a fallback; a semantically corrupted payload (weight 0) counts as a miss | a Redis failure does not affect selection; cache poisoning does not reach the router (validation + weight guard) | rules from the cache require read-time validation; the cache staleness window applies to admin changes too | the admin path is implemented in 12.2 (revision + disabled set, T-CONNECTOR-10); invalidation on every admin write plus the TTL bound staleness |
+| T-CONNECTOR-09 | Concurrent rule `Save` operations are serialized by an advisory lock; the cache staleness window during a Load/Save race is bounded by TTL (≤ 60 s); a half-open provider participates in selection again, excess probes are rejected | replace-all without merging configurations; provider recovery without manual intervention | automatic failover to another provider is not performed; staleness window up to 60 s | failover is a separate task after 3.2; the admin path adds the configuration revision (12.2) |
+| T-CONNECTOR-10 | Admin contour (12.2): the revision lives in `routing_config` (a single row, advisory lock + `FOR UPDATE`); the disabled set is persisted in `disabled_providers` and applied by filtering the rule source (the router is untouched); `ConnectorAdminService` is a separate gRPC service so the money-path `ConnectorService` server interface and its fakes stay source-compatible; the back-office is the only client and enforces RBAC and audit | optimistic concurrency between operators; cache consistency via invalidation on every attempt plus the TTL; the exclusion is visible in `Load` | the admin RPCs have no authN inside the trusted network (mTLS - 0.6) and mutate the money routing: port 9050 must not leave the trusted zone (KI-connector-03) | provider enable is an additive follow-up (KI-connector-09); disabled rows have no retention yet |
 
 ## 9. Known issues
 
@@ -102,12 +105,13 @@ consumer lag; dashboards after task 0.7.
 | :-- | :-- | :-- | :-- | :-- |
 | KI-connector-01 | CI and pre-commit are not configured | linters run manually | task 0.2 | open |
 | KI-connector-02 | No real provider adapter (KI-01) | normalization is verified by the sandbox decoder and e2e on testcontainers, not by a live gateway | task 3.2 after the provider is fixed | open |
-| KI-connector-03 | No mTLS on the gRPC server | do not expose port 9050 outside the trusted network | task 0.6 | open |
+| KI-connector-03 | No mTLS on the gRPC server (port 9050), now including the money-routing admin RPCs (`PutRoutingRules`, `DisableProvider`); the admin contour has no authN | do not expose port 9050 outside the trusted network: an unauthorized caller could reroute the platform | task 0.6 (mTLS); the back-office is the only intended client | open |
 | KI-connector-04 | No cleanup of published outbox (canonical payload) and old inbox records; raw webhook bodies live in the webhook-ingress outbox and Kafka retry/DLQ topics | tables and topics grow, including sensitive provider headers | retention task (0.4/14.x), ACL/retention DLQ (0.5/5.3) | open |
 | KI-connector-05 | Kit inbox: `x-error` is not truncated, a failed retry/DLQ publication is not parked, retries have no delay | with giant/broken events a redelivery storm is possible; in 3.5 bounded by field and body size limits | kit hardening (error truncation, parking, delays) - tasks 1.3-revision/14.2 | open |
 | KI-connector-06 | Kafka in compose is PLAINTEXT without SASL/ACL: writing to gateway.webhooks.raw is not restricted to Ingress; Connector trusts `signature_verified` | spoofing the signature flag with topic access bypasses verification | SASL/TLS and ACL for writing to the raw topic - task 0.5; alert on producer mismatch - 14.4 | open |
 | KI-connector-07 | Circuit breaker state is in-process: with several replicas the trip threshold and half-open probes are not coordinated; the Redis key `cb:{provider}` is reserved | with multiple instances there may be extra calls to a degrading provider | consolidate shared state when a multi-instance requirement appears (T-CONNECTOR-06); thresholds are configurable | open |
-| KI-connector-08 | The admin path for routing rules is missing: `GET/PUT /admin/v1/routing-rules` (12.x) requires a new gRPC contract in connector (cbl-protos), RBAC and audit; currently rules are changed by direct configuration replacement (repository) | there is no way to change rules in production without SQL | freeze the admin path contract in CF-3 and implement it in 12.x (T-CONNECTOR-08) | open |
+| KI-connector-08 | The admin path for routing rules was missing: `GET/PUT /admin/v1/routing-rules` (12.x) required a new gRPC contract in connector (cbl-protos), RBAC and audit; until then rules were changed by direct configuration replacement | there was no way to change rules in production without SQL | CLOSED 16.10.2026: `ConnectorAdminService` (cf-3.7) implemented in 12.2 (revision-based `PutRoutingRules`, `GetRoutingRules`, `DisableProvider`; migration 00004; RBAC and audit on the back-office side) | closed |
+| KI-connector-09 | No provider enable and no retention on `disabled_providers`: the table grows monotonically and a disabled provider can only be re-enabled by SQL | an erroneous or temporary disable requires manual DB work; the table grows without bounds | an additive `EnableProvider` RPC (with RBAC and audit, cf-3.x) and a retention/archive decision with 14.2 when the volume warrants it | open |
 
 ## 10. Task journal
 
@@ -118,6 +122,7 @@ consumer lag; dashboards after task 0.7.
 | CBL-3.4 | 2026-10-14 | done, review closed (rules in PG, route:config cache with fallback, weighted selection, breaker-aware; coverage 91.8%) | `.specs/CBL-3.4-router.md` | 5c3204e |
 | CBL-3.5 | 2026-10-14 | done, review closed (normalization pipeline, sandbox decoder, untrusted input limits, e2e Kafka+PG with a poison-pill scenario, coverage 93.1%) | `.specs/CBL-3.5-normalizer.md` | 04aac61 |
 | CBL-16.8 | 2026-10-16 | done (English comments and documentation across the repository: code, tests, migrations, configs, all four specs, AGENTS.md, README; e2e runs via `test/e2e/E2E.md` with scenario E2E_Connector_Smoke, `smoke.ps1` and `make smoke` removed; validation run PASS; coverage unchanged) | `.specs/CBL-16.8-conventions.md` | this commit |
+| CBL-12.2 | 2026-10-16 | done, review closed (admin contour: migration 00004 with the routing revision and disabled providers; revision-based ReplaceWithRevision under the advisory lock; DisableProvider idempotent, known-provider union incl. the disabled set; `ConnectorAdminService` registered on :9050; the rule source filters disabled providers and the cache payload carries the disabled set; smoke extended with the grpcurl read; coverage 91.6%) | `.specs/CBL-12.2-connector-admin.md` | this commit; contracts `cbl-protos@cf-3.7..cf-3.10` |
 
 ## 11. Runbook
 
@@ -141,10 +146,11 @@ Provider resilience (3.3):
    look at the reason in the error chain (attempt timeout, `ErrTemporary`). With many
    replicas remember KI-connector-07 (breaker state is not shared).
 
-Routing (3.4):
+Routing (3.4, admin contour 12.2):
 
 1. Log `routing rules loaded` at startup: 0 rules with connected providers means that
-   selection will return `ErrUnsupportedNetwork`; rules cannot be changed (KI-connector-08).
+   selection will return `ErrUnsupportedNetwork`; rules are changed through the
+   back-office admin API (12.2) or the ConnectorAdminService directly.
 2. Log `route config cache payload is invalid` / `cache read failed`: Redis returns garbage
    or is unavailable - selection keeps working via the DB; check the `route:config` content
    (the key may be poisoned: T-02, read-time validation already filters).
@@ -152,3 +158,9 @@ Routing (3.4):
    failures; check logs `provider breaker state changed` and recovery to half-open.
 4. `ErrUnsupportedNetwork`: no rule covers the operation/network/asset/amount;
    verify the rules and `Capabilities` of registered providers (3.2).
+5. Revision conflicts from `PutRoutingRules` are normal under concurrent operators: the
+   back-office surfaces 409; the operator repeats from a fresh `GetRoutingRules`.
+6. A disabled provider disappears from selection immediately after cache invalidation
+   (30 - 60 s worst case via TTL): `SELECT provider, reason, disabled_at FROM
+   disabled_providers`; re-enabling needs SQL until the `EnableProvider` RPC
+   (KI-connector-09).

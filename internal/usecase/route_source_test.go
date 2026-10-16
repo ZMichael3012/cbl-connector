@@ -15,11 +15,13 @@ import (
 
 // fakeRouteStore substitutes the rule repository.
 type fakeRouteStore struct {
-	rules     []domain.RouteRule
-	loadErr   error
-	saveErr   error
-	saveCalls int
-	saved     []domain.RouteRule
+	rules       []domain.RouteRule
+	disabled    []string
+	loadErr     error
+	disabledErr error
+	saveErr     error
+	saveCalls   int
+	saved       []domain.RouteRule
 }
 
 // LoadEnabled returns the prepared rules.
@@ -28,6 +30,14 @@ func (s *fakeRouteStore) LoadEnabled(context.Context) ([]domain.RouteRule, error
 		return nil, s.loadErr
 	}
 	return s.rules, nil
+}
+
+// ListDisabled returns the prepared disabled providers.
+func (s *fakeRouteStore) ListDisabled(context.Context) ([]string, error) {
+	if s.disabledErr != nil {
+		return nil, s.disabledErr
+	}
+	return s.disabled, nil
 }
 
 // Save records the rule replacement.
@@ -43,7 +53,7 @@ func (s *fakeRouteStore) Save(_ context.Context, rules []domain.RouteRule) error
 
 // fakeRouteCache substitutes the Redis cache.
 type fakeRouteCache struct {
-	rules           []domain.RouteRule
+	snapshot        domain.RouteConfigSnapshot
 	present         bool
 	getErr          error
 	setErr          error
@@ -54,21 +64,21 @@ type fakeRouteCache struct {
 }
 
 // Get returns the prepared cache value.
-func (c *fakeRouteCache) Get(context.Context) ([]domain.RouteRule, bool, error) {
+func (c *fakeRouteCache) Get(context.Context) (domain.RouteConfigSnapshot, bool, error) {
 	if c.getErr != nil {
-		return nil, false, c.getErr
+		return domain.RouteConfigSnapshot{}, false, c.getErr
 	}
-	return c.rules, c.present, nil
+	return c.snapshot, c.present, nil
 }
 
 // Set records the configuration write.
-func (c *fakeRouteCache) Set(_ context.Context, rules []domain.RouteRule, ttl time.Duration) error {
+func (c *fakeRouteCache) Set(_ context.Context, snapshot domain.RouteConfigSnapshot, ttl time.Duration) error {
 	c.setCalls++
 	c.lastTTL = ttl
 	if c.setErr != nil {
 		return c.setErr
 	}
-	c.rules = rules
+	c.snapshot = snapshot
 	c.present = true
 	return nil
 }
@@ -125,7 +135,7 @@ func TestCachedRouteRulesLoadHitSkipsStore(t *testing.T) {
 	t.Parallel()
 
 	store := &fakeRouteStore{loadErr: errors.New("db down")}
-	cache := &fakeRouteCache{rules: sampleRules(), present: true}
+	cache := &fakeRouteCache{snapshot: domain.RouteConfigSnapshot{Rules: sampleRules()}, present: true}
 	source := usecase.NewCachedRouteRules(store, cache, 0, nil)
 
 	rules, err := source.Load(context.Background())
@@ -140,12 +150,29 @@ func TestCachedRouteRulesRejectsInvalidCachePayload(t *testing.T) {
 	// otherwise the router would get a zero weight sum.
 	poisoned := []domain.RouteRule{{Provider: "sandbox", Priority: 0, Weight: 0, Enabled: true}}
 	store := &fakeRouteStore{rules: sampleRules()}
-	cache := &fakeRouteCache{rules: poisoned, present: true}
+	cache := &fakeRouteCache{snapshot: domain.RouteConfigSnapshot{Rules: poisoned}, present: true}
 	source := usecase.NewCachedRouteRules(store, cache, 0, nil)
 
 	rules, err := source.Load(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, sampleRules(), rules, "the poisoned cache is overridden by storage data")
+	assert.Equal(t, 1, cache.setCalls, "the valid payload is warmed into the cache")
+}
+
+func TestCachedRouteRulesRejectsInvalidDisabledPayload(t *testing.T) {
+	t.Parallel()
+
+	// A disabled entry that is empty after trimming is a corrupted payload: a miss.
+	store := &fakeRouteStore{rules: sampleRules()}
+	cache := &fakeRouteCache{
+		snapshot: domain.RouteConfigSnapshot{Rules: sampleRules(), Disabled: []string{"  "}},
+		present:  true,
+	}
+	source := usecase.NewCachedRouteRules(store, cache, 0, nil)
+
+	rules, err := source.Load(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, sampleRules(), rules)
 	assert.Equal(t, 1, cache.setCalls, "the valid payload is warmed into the cache")
 }
 
@@ -157,6 +184,38 @@ func TestCachedRouteRulesRejectsInvalidStorageRules(t *testing.T) {
 
 	_, err := source.Load(context.Background())
 	require.Error(t, err, "corruption of the source of truth must not reach the router")
+}
+
+func TestCachedRouteRulesDisableErrorFallback(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeRouteStore{rules: sampleRules(), disabledErr: errors.New("db down")}
+	source := usecase.NewCachedRouteRules(store, &fakeRouteCache{}, 0, nil)
+
+	_, err := source.Load(context.Background())
+	require.Error(t, err, "the disabled set is part of the source of truth")
+}
+
+func TestCachedRouteRulesFiltersDisabledProviders(t *testing.T) {
+	t.Parallel()
+
+	active := domain.RouteRule{Provider: "active", Priority: 0, Weight: 1, Enabled: true}
+	muted := domain.RouteRule{Provider: "muted", Priority: 0, Weight: 1, Enabled: true}
+	store := &fakeRouteStore{rules: []domain.RouteRule{active, muted}, disabled: []string{"muted"}}
+	cache := &fakeRouteCache{}
+	source := usecase.NewCachedRouteRules(store, cache, 0, nil)
+
+	rules, err := source.Load(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []domain.RouteRule{active}, rules, "disabled providers never reach the router")
+	require.Len(t, cache.snapshot.Rules, 2, "the cache keeps the full enabled set")
+	assert.Equal(t, []string{"muted"}, cache.snapshot.Disabled)
+
+	// A cache hit filters likewise.
+	source = usecase.NewCachedRouteRules(&fakeRouteStore{loadErr: errors.New("db down")}, cache, 0, nil)
+	rules, err = source.Load(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []domain.RouteRule{active}, rules)
 }
 
 func TestCachedRouteRulesCacheErrorsFallback(t *testing.T) {
@@ -186,7 +245,7 @@ func TestCachedRouteRulesSaveInvalidatesCache(t *testing.T) {
 	t.Parallel()
 
 	store := &fakeRouteStore{}
-	cache := &fakeRouteCache{rules: sampleRules(), present: true}
+	cache := &fakeRouteCache{snapshot: domain.RouteConfigSnapshot{Rules: sampleRules()}, present: true}
 	source := usecase.NewCachedRouteRules(store, cache, 0, nil)
 
 	rules := sampleRules()

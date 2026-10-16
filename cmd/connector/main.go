@@ -32,7 +32,10 @@ import (
 	"github.com/cbl/cbl-kit/outbox/kafkapub"
 	"github.com/cbl/cbl-kit/storagex"
 
+	connectorv1 "github.com/cbl/cbl-protos/gen/go/billing/connector/v1"
+
 	"github.com/cbl/cbl-connector/internal/storage"
+	"github.com/cbl/cbl-connector/internal/transport"
 	"github.com/cbl/cbl-connector/internal/usecase"
 )
 
@@ -110,6 +113,11 @@ func main() {
 		log.Info("routing rules loaded", zap.Int("rules", len(rules)))
 	}
 
+	// The admin contour (CBL-12.2): routing configuration revision and manual
+	// provider disable; the provider registry of the union check arrives with
+	// task 3.2 (KI-01), the rules themselves are known today.
+	adminRouting := usecase.NewAdminRouting(ruleStore, ruleSource, nil, log)
+
 	if brokers := os.Getenv("KAFKA_BROKERS"); brokers != "" {
 		brokerList := strings.Split(brokers, ",")
 		publisher, pubErr := kafkapub.New(brokerList)
@@ -182,6 +190,7 @@ func main() {
 	healthSrv := health.NewServer()
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 	grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
+	connectorv1.RegisterConnectorAdminServiceServer(grpcSrv, transport.NewAdminServer(adminRouting, log))
 	reflection.Register(grpcSrv)
 
 	grpcListener, err := net.Listen("tcp", grpcAddr)

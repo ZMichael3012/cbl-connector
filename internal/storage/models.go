@@ -73,3 +73,24 @@ type RouteRuleRow struct {
 
 // TableName specifies the routing_rules table name.
 func (RouteRuleRow) TableName() string { return "routing_rules" }
+
+// ProviderInvoiceRow describes a provider_invoices table row (17.2).
+type ProviderInvoiceRow struct {
+	// ID specifies the mapping UUIDv7.
+	ID string `gorm:"column:id;type:uuid;primaryKey"`
+	// Provider specifies the provider name.
+	Provider string `gorm:"column:provider"`
+	// GatewayID specifies the provider invoice identifier.
+	GatewayID string `gorm:"column:gateway_id"`
+	// PaymentID specifies the platform payment UUID.
+	PaymentID string `gorm:"column:payment_id"`
+	// OrderID specifies the order reference sent to the provider.
+	OrderID string `gorm:"column:order_id"`
+	// RequestHash specifies the hash of the creation request.
+	RequestHash string `gorm:"column:request_hash"`
+	// CreatedAt specifies the mapping creation time.
+	CreatedAt time.Time `gorm:"column:created_at"`
+}
+
+// TableName specifies the provider_invoices table name.
+func (ProviderInvoiceRow) TableName() string { return "provider_invoices" }

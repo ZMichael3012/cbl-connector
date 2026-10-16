@@ -68,7 +68,7 @@ func (n *Normalizer) Handle(ctx context.Context, tx *gorm.DB, msg inbox.Message)
 		return fmt.Errorf("%w: unmarshal raw webhook: %w", domain.ErrInvalidWebhook, err)
 	}
 	provider := strings.TrimSpace(raw.GetProvider())
-	if !raw.GetSignatureVerified() {
+	if !raw.GetSignatureVerified() { //nolint:staticcheck // SA1019: replaced by signature_state in the 17.2 part 2 fetch-to-verify rework
 		return fmt.Errorf("%w: provider %q", domain.ErrUnsignedWebhook, provider)
 	}
 	decoder, ok := n.registry.Decoder(provider)

@@ -4,6 +4,7 @@ package domain
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -296,7 +297,10 @@ type Capabilities struct {
 	Networks map[string]NetworkCapability
 }
 
-// PaymentGateway describes the external crypto gateway port.
+// PaymentGateway describes the external crypto gateway port (SPI v1 core).
+// Adapters implement it plus the optional SPI v1 interfaces they support
+// (LookupGateway, Refunder); the core depends only on these interfaces and the
+// provider manifest, so adding a provider does not change the core (17.2).
 type PaymentGateway interface {
 	// CreateInvoice creates an invoice in the external gateway.
 	CreateInvoice(ctx context.Context, req CreateInvoiceRequest) (Invoice, error)
@@ -310,6 +314,87 @@ type PaymentGateway interface {
 	GetPayout(ctx context.Context, gatewayPayoutID string) (PayoutStatus, error)
 	// Capabilities returns the provider capabilities.
 	Capabilities() Capabilities
+}
+
+// LookupGateway is the optional SPI v1 interface for invoice recovery after a
+// timeout (17.2): a lookup by our order id (the platform payment id) prevents a
+// second invoice when a create call ends without a response.
+type LookupGateway interface {
+	// LookupByOrderID returns the canonical status of the invoice created for
+	// the order; ErrNotFound means no invoice exists for the order.
+	LookupByOrderID(ctx context.Context, orderID string) (PaymentStatus, error)
+}
+
+// RefundRequest describes a refund request to the provider.
+type RefundRequest struct {
+	// IdempotencyKey sets the call idempotency key.
+	IdempotencyKey string
+	// RefundInvoiceID sets the platform refund reference.
+	RefundInvoiceID string
+	// PaymentID sets the platform payment being refunded.
+	PaymentID string
+	// GatewayID sets the provider invoice identifier.
+	GatewayID string
+	// Amount sets the refund amount.
+	Amount money.Money
+	// Address sets an optional destination address for the refund.
+	Address string
+}
+
+// Refund describes a refund created at the provider.
+type Refund struct {
+	// GatewayRefundID sets the refund identifier at the provider.
+	GatewayRefundID string
+	// Provider sets the provider name.
+	Provider string
+	// Amount sets the refunded amount.
+	Amount money.Money
+}
+
+// Refunder is the optional SPI v1 interface of providers with a refunds API;
+// providers without it (NOWPayments) go through the manual path (decision 8).
+type Refunder interface {
+	// CreateRefund creates a refund in the external gateway.
+	CreateRefund(ctx context.Context, req RefundRequest) (Refund, error)
+}
+
+// ProviderInvoice maps a platform payment to the provider invoice: real
+// webhooks do not carry our payment_id, so the mapping resolves it by
+// provider and gateway_id (T-CONNECTOR-03, 17.2). order_id is the platform
+// order reference sent to the provider (the payment UUID).
+type ProviderInvoice struct {
+	// Provider sets the provider name.
+	Provider string
+	// GatewayID sets the invoice identifier at the provider.
+	GatewayID string
+	// PaymentID sets the platform payment UUID.
+	PaymentID string
+	// OrderID sets the order reference sent to the provider.
+	OrderID string
+	// RequestHash sets the hash of the creation request for conflict checks.
+	RequestHash string
+	// CreatedAt sets the mapping creation time.
+	CreatedAt time.Time
+}
+
+// ErrInvalidProviderInvoice reports an invalid provider invoice mapping.
+var ErrInvalidProviderInvoice = errors.New("connector: invalid provider invoice mapping")
+
+// Validate checks the mapping invariants before it reaches the storage.
+func (m ProviderInvoice) Validate() error {
+	if !validCode(m.Provider, maxProviderLen) {
+		return fmt.Errorf("%w: invalid provider %q", ErrInvalidProviderInvoice, m.Provider)
+	}
+	if !validPrintable(m.GatewayID, maxGatewayIDLen) {
+		return fmt.Errorf("%w: invalid gateway_id", ErrInvalidProviderInvoice)
+	}
+	if _, err := uuid.Parse(strings.TrimSpace(m.PaymentID)); err != nil {
+		return fmt.Errorf("%w: payment_id must be uuid", ErrInvalidProviderInvoice)
+	}
+	if !validPrintable(m.OrderID, maxGatewayIDLen) {
+		return fmt.Errorf("%w: invalid order_id", ErrInvalidProviderInvoice)
+	}
+	return nil
 }
 
 // RouteRequest describes a provider selection request.

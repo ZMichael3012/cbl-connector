@@ -34,6 +34,7 @@ import (
 
 	connectorv1 "github.com/cbl/cbl-protos/gen/go/billing/connector/v1"
 
+	"github.com/cbl/cbl-connector/internal/domain"
 	"github.com/cbl/cbl-connector/internal/storage"
 	"github.com/cbl/cbl-connector/internal/transport"
 	"github.com/cbl/cbl-connector/internal/usecase"
@@ -68,6 +69,16 @@ func main() {
 		log.Error("apply migrations failed", zap.String("dir", migrationsDir), zap.Error(migrateErr))
 		return
 	}
+
+	// Provider manifests (17.2, SPI v1): the versioned registry is the source of
+	// truth for known providers; adapters plug into the core through it and the
+	// SPI interfaces without core changes (functional extensibility guarantee).
+	manifestRegistry, err := usecase.NewManifestRegistry(domain.BuiltinManifests()...)
+	if err != nil {
+		log.Error("build provider manifest registry failed", zap.Error(err))
+		return
+	}
+	log.Info("provider manifests loaded", zap.Int("providers", len(manifestRegistry.IDs())))
 
 	decoders := make([]usecase.WebhookDecoder, 0, 2)
 	for _, provider := range splitCSV(getenv("CONNECTOR_SANDBOX_PROVIDERS", "mock")) {
@@ -114,9 +125,9 @@ func main() {
 	}
 
 	// The admin contour (CBL-12.2): routing configuration revision and manual
-	// provider disable; the provider registry of the union check arrives with
-	// task 3.2 (KI-01), the rules themselves are known today.
-	adminRouting := usecase.NewAdminRouting(ruleStore, ruleSource, nil, log)
+	// provider disable; the manifest registry (17.2) supplies the known-provider
+	// set of the disable check.
+	adminRouting := usecase.NewAdminRouting(ruleStore, ruleSource, manifestRegistry.IDs, log)
 
 	if brokers := os.Getenv("KAFKA_BROKERS"); brokers != "" {
 		brokerList := strings.Split(brokers, ",")

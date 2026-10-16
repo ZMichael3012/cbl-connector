@@ -1,0 +1,78 @@
+# CBL-17.2. Connector SPI revision: manifests, SPI v1, provider invoice mapping
+
+| Field | Value |
+| :-- | :-- |
+| Epic | E17 (task CBL-17.2) |
+| Repository | `cbl-connector` |
+| Size | L (delivered in two parts) |
+| Wave and parallel group | W5-PROVIDER, stage B |
+| Depends on | CF-4 (`cbl-protos@cf-4`/`cf-4.1`), `cbl-kit` 7900510 (`webhooksig`, `ratelimit`, `money` parsing) |
+| Contract version | consumes `cbl-protos@cf-4.1`, `cbl-kit` 7900510 |
+| Status | in progress (part 1 done, part 2 pending) |
+
+## 1. Context and goal
+
+The connector becomes the provider contour core (CBL-004, E17; plan sections 3.1 - 3.3 and
+14.2): a versioned provider manifest registry, the SPI v1 revision with optional interfaces,
+the provider invoice mapping that resolves real webhooks to platform payments
+(T-CONNECTOR-03), the fetch-to-verify pipeline, the capabilities loader and per-provider
+limiter wiring. The task is delivered in two parts because the adapters (17.6 - 17.9)
+consume the foundation incrementally; part 1 (this commit) adds the registry, the SPI v1
+interfaces and the mapping; part 2 adds the pipelines and wiring.
+
+## 2. Requirements
+
+FR-1 (part 1, done). Provider manifest schema v1 (`internal/domain/manifest.go`): version,
+id, display name, operations (invoice/payout/refund), verification strategy
+(raw_hmac/canonical_json_hmac/token_echo/none, defense in depth T-CONNECTOR-01),
+capabilities source (api/static), Vault secret path and keys, token bucket limits, sandbox
+flag; `Validate` enforces the invariants (unknown version/strategy/operations, missing
+strategy fields, burst and refill bounds aligned with the kit limiter). `BuiltinManifests`
+carries the evaluated providers with the plan decision limits: CoinGate 180/min Burst 60,
+NOWPayments 60 rpm (the conservative width of the official 3 rps), BitPay 30 rpm, BTCPay
+unlimited (own stand), mock sandbox with `none` verification.
+
+FR-2 (part 1, done). `usecase.ManifestRegistry`: validated registration (duplicates and
+invalid manifests are errors), `Lookup`, `IDs` (stable order), `List`; main wires the
+built-ins and passes `IDs` as the registry side of the admin known-provider union
+(CBL-12.2 FR-3).
+
+FR-3 (part 1, done). SPI v1 revision (`internal/domain/gateway.go`), additive by
+construction: the `PaymentGateway` core port stays source-compatible; optional interfaces
+`LookupGateway` (`LookupByOrderID`, invoice recovery after timeouts) and `Refunder`
+(`CreateRefund`; providers without it use the manual path, decision 8) join it; the SPI v1
+doc comment fixes the rule "the core depends on interfaces and manifests only".
+
+FR-4 (part 1, done). Provider invoice mapping: migration `00005_provider_invoices.sql`
+(unique `(provider, gateway_id)`, indexes on `payment_id` and `(provider, order_id)`),
+`domain.ProviderInvoice` with validation, `storage.ProviderInvoicesRepository`
+(`Save` idempotent insert with created flag, `ByGatewayID`, `ByOrderID`, not-found
+sentinel); integration tests on real PostgreSQL cover the round trip, the duplicate save
+and the validation.
+
+FR-5 (part 2). Fetch-to-verify pipeline in the normalizer: consume `signature_state` and
+`fetch_required` (CF-4), fail closed on non-verified raws, resolve `payment_id` through the
+mapping, fetch via the adapter and compare before publishing a canonical event; mismatch or
+fetch failure goes to the DLQ.
+
+FR-6 (part 2). Capabilities loader: aggregate adapter capabilities with a Redis cache, TTL
+and static fallback; serve `GetCapabilities` with the provider filter.
+
+FR-7 (part 2). Per-provider limiter and clients: kit `ratelimit` decorator over adapters
+(shared Redis bucket, local fallback), `Pause` on provider `Retry-After`, wiring of the
+manifest limits; register `ConnectorService` on gRPC using the Router and the registry.
+
+FR-8 (part 2). `providers` table and admin visibility (17.15 consumes it); payout/refund
+operations surface through `ConnectorService` once adapters exist (17.6 - 17.9, 17.11).
+
+## 3. Work plan
+
+Part 1 (this commit): spec -> manifest registry, SPI v1 interfaces, mapping migration and
+repository with integration tests -> main wiring of the registry and the admin union ->
+battery -> commit `CBL-17.2: provider manifests, SPI v1 interfaces and invoice mapping`.
+
+Part 2 (next): fetch-to-verify, capabilities loader, limiter decorator, `ConnectorService`
+transport; then adapters 17.6 - 17.9.
+
+Delivered checks (part 1): unit tests for manifests, registry, mapping validation;
+integration tests on PostgreSQL; lint, vet and em dash checks green.

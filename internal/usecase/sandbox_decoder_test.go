@@ -26,7 +26,7 @@ func rawWebhook(body string) *eventsv1.GatewayWebhookRaw {
 		GatewayId:         "inv-1",
 		ReceivedAt:        timestamppb.New(time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)),
 		RawBody:           []byte(body),
-		SignatureVerified: true,
+		SignatureVerified: true, //nolint:staticcheck // SA1019: the deprecated mirror stays until the 17.2 part 2 rework
 	}
 }
 

@@ -12,6 +12,8 @@ const (
 	OperationInvoice = "invoice"
 	// OperationPayout sets the payout operation.
 	OperationPayout = "payout"
+	// OperationRefund sets the refund operation (17.2).
+	OperationRefund = "refund"
 )
 
 // RouteRule describes a provider selection rule.

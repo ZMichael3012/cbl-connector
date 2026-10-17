@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -40,6 +41,7 @@ import (
 	"github.com/cbl/cbl-connector/internal/domain"
 	"github.com/cbl/cbl-connector/internal/gateway"
 	"github.com/cbl/cbl-connector/internal/providers/btcpay"
+	"github.com/cbl/cbl-connector/internal/providers/coingate"
 	"github.com/cbl/cbl-connector/internal/storage"
 	"github.com/cbl/cbl-connector/internal/transport"
 	"github.com/cbl/cbl-connector/internal/usecase"
@@ -85,11 +87,29 @@ func main() {
 	}
 	log.Info("provider manifests loaded", zap.Int("providers", len(manifestRegistry.IDs())))
 
-	// Provider adapters (17.6 - 17.9): the BTCPay adapter is the first real
-	// provider (dev/CI contour). Without CONNECTOR_BTCPAY_BASE_URL the runtime
-	// stays fail-closed: no gateways, the unavailable selector and no fetcher.
+	// Provider adapters (17.6 - 17.9): the BTCPay and CoinGate adapters are the
+	// first real providers; CONNECTOR_PROVIDERS optionally restricts the set to
+	// an allowlist (the e2e scenarios select one provider). Without provider
+	// base URLs the runtime stays fail-closed: no gateways, the unavailable
+	// selector and no fetcher.
+	providerAllow := splitCSV(os.Getenv("CONNECTOR_PROVIDERS"))
+	for i, allowed := range providerAllow {
+		providerAllow[i] = strings.ToLower(allowed)
+	}
+	for _, allowed := range providerAllow {
+		if !slices.Contains(manifestRegistry.IDs(), allowed) {
+			log.Error("CONNECTOR_PROVIDERS names an unknown provider", zap.String("provider", allowed))
+			return
+		}
+	}
+	providerEnabled := func(id string) bool {
+		if len(providerAllow) == 0 {
+			return true
+		}
+		return slices.Contains(providerAllow, id)
+	}
 	gateways := map[string]domain.PaymentGateway{}
-	if base := strings.TrimSpace(os.Getenv("CONNECTOR_BTCPAY_BASE_URL")); base != "" {
+	if base := strings.TrimSpace(os.Getenv("CONNECTOR_BTCPAY_BASE_URL")); base != "" && providerEnabled("btcpay") {
 		capabilities, capsErr := capabilitiesFromEnv(os.Getenv("CONNECTOR_BTCPAY_CAPABILITIES"))
 		if capsErr != nil {
 			log.Error("parse CONNECTOR_BTCPAY_CAPABILITIES failed", zap.Error(capsErr))
@@ -113,6 +133,26 @@ func main() {
 		// rate limit (the BTCPay stand declares none).
 		gateways["btcpay"] = gateway.New(adapter, gateway.ConfigFromEnv(os.Getenv), gateway.WithLogger(log))
 		log.Info("btcpay adapter configured", zap.String("base_url", base))
+	}
+	if base := strings.TrimSpace(os.Getenv("CONNECTOR_COINGATE_BASE_URL")); base != "" && providerEnabled("coingate") {
+		capabilities, capsErr := capabilitiesFromEnv(os.Getenv("CONNECTOR_COINGATE_CAPABILITIES"))
+		if capsErr != nil {
+			log.Error("parse CONNECTOR_COINGATE_CAPABILITIES failed", zap.Error(capsErr))
+			return
+		}
+		adapter, adapterErr := coingate.New(coingate.Config{
+			BaseURL:      base,
+			APIToken:     os.Getenv("CONNECTOR_COINGATE_API_TOKEN"),
+			IPNToken:     []byte(os.Getenv("CONNECTOR_COINGATE_IPN_TOKEN")),
+			Capabilities: capabilities,
+			Timeout:      durationEnv(log, "CONNECTOR_COINGATE_TIMEOUT", 10*time.Second),
+		})
+		if adapterErr != nil {
+			log.Error("build coingate adapter failed", zap.Error(adapterErr))
+			return
+		}
+		gateways["coingate"] = gateway.New(adapter, gateway.ConfigFromEnv(os.Getenv), gateway.WithLogger(log))
+		log.Info("coingate adapter configured", zap.String("base_url", base))
 	}
 
 	decoders := make([]usecase.WebhookDecoder, 0, 2)

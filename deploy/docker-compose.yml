@@ -111,13 +111,21 @@ services:
       KAFKA_CONSUMER_GROUP: cbl-connector-webhooks
       CONNECTOR_SANDBOX_PROVIDERS: mock
       REDIS_ADDR: redis:6379
-      # Stand-only placeholders: production injects the CONNECTOR_BTCPAY_* values
-      # from Vault (the manifest declares secret/cbl/{env}/btcpay).
-      CONNECTOR_BTCPAY_BASE_URL: http://mock-gateway:8120
+      # Optional provider allowlist (CSV): the e2e scenarios select one provider;
+      # empty means every provider with a configured base URL is enabled.
+      CONNECTOR_PROVIDERS: ${CONNECTOR_PROVIDERS-}
+      # Stand-only placeholders: production injects the adapter values from
+      # Vault (the manifests declare the secret paths). The provider scenarios
+      # select adapters through the CONNECTOR_PROVIDERS allowlist.
+      CONNECTOR_BTCPAY_BASE_URL: ${CONNECTOR_BTCPAY_BASE_URL-http://mock-gateway:8120}
       CONNECTOR_BTCPAY_STORE_ID: mock-store
       CONNECTOR_BTCPAY_API_TOKEN: mock-token
       CONNECTOR_BTCPAY_WEBHOOK_SECRET: mock-btcpay-secret
       CONNECTOR_BTCPAY_CAPABILITIES: '[{"network":"btc","asset":"BTC","min_minor":10000,"decimals":8,"confirmations":2}]'
+      CONNECTOR_COINGATE_BASE_URL: ${CONNECTOR_COINGATE_BASE_URL-}
+      CONNECTOR_COINGATE_API_TOKEN: ${CONNECTOR_COINGATE_API_TOKEN-}
+      CONNECTOR_COINGATE_IPN_TOKEN: ${CONNECTOR_COINGATE_IPN_TOKEN-}
+      CONNECTOR_COINGATE_CAPABILITIES: ${CONNECTOR_COINGATE_CAPABILITIES-}
     ports:
       - "8050:8050"
       - "9050:9050"

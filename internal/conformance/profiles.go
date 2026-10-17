@@ -230,7 +230,7 @@ func coinGateFixtures() ProfileFixtures {
 		PaymentUnknown:   payment("totally_unknown"),
 		LookupPath:       "GET /v2/orders?order_id={order}",
 		PayoutPath:       "POST /v2/send_request",
-		PayoutTemplate:   []byte(`{"id":777,"status":"new"}`),
+		PayoutTemplate:   []byte(`{"id":777,"state":"new"}`),
 		PayoutGatewayID:  "777",
 		Secret:           secret,
 		WebhookValid:     valid,

@@ -19,6 +19,7 @@ import (
 	"github.com/cbl/cbl-kit/money"
 
 	"github.com/cbl/cbl-connector/internal/domain"
+	providerwire "github.com/cbl/cbl-connector/internal/providers/wire"
 )
 
 // Adapter bounds.
@@ -175,7 +176,7 @@ type payoutResponse struct {
 
 // CreateInvoice creates a hosted invoice in the store.
 func (a *Adapter) CreateInvoice(ctx context.Context, req domain.CreateInvoiceRequest) (domain.Invoice, error) {
-	if _, err := a.decimalsFor(req.Amount.Asset); err != nil {
+	if _, err := a.ensureAmountScale(req.Amount); err != nil {
 		return domain.Invoice{}, err
 	}
 	body := map[string]any{
@@ -239,29 +240,20 @@ func (a *Adapter) GetPayment(ctx context.Context, gatewayID string) (domain.Paym
 
 // LookupByOrderID finds the invoice created for the order reference; the real
 // Greenfield list answers an array, the mock profile answers a single object
-// (spec D4), so both shapes are accepted.
+// (spec D4), so both shapes are accepted through the shared wire decoder.
 func (a *Adapter) LookupByOrderID(ctx context.Context, orderID string) (domain.PaymentStatus, error) {
 	path := a.storePath("/invoices") + "?orderId=" + url.QueryEscape(orderID)
 	payload, err := a.request(ctx, http.MethodGet, path, nil, domain.ErrGatewayNotFound)
 	if err != nil {
 		return domain.PaymentStatus{}, err
 	}
-	trimmed := bytes.TrimSpace(payload)
-	var decoded invoiceResponse
-	switch {
-	case len(trimmed) > 0 && trimmed[0] == '[':
-		var list []invoiceResponse
-		if err := json.Unmarshal(trimmed, &list); err != nil {
-			return domain.PaymentStatus{}, fmt.Errorf("btcpay: decode invoice list: %w", err)
+	decoded, err := providerwire.DecodeArrayOrObject[invoiceResponse](payload,
+		fmt.Errorf("%w: no invoice for order %q", domain.ErrGatewayNotFound, orderID))
+	if err != nil {
+		if !errors.Is(err, domain.ErrGatewayNotFound) {
+			return domain.PaymentStatus{}, fmt.Errorf("btcpay: %w", err)
 		}
-		if len(list) == 0 {
-			return domain.PaymentStatus{}, fmt.Errorf("%w: no invoice for order %q", domain.ErrGatewayNotFound, orderID)
-		}
-		decoded = list[0]
-	default:
-		if err := json.Unmarshal(trimmed, &decoded); err != nil {
-			return domain.PaymentStatus{}, fmt.Errorf("btcpay: decode invoice lookup: %w", err)
-		}
+		return domain.PaymentStatus{}, err
 	}
 	return a.statusOf(decoded.ID, decoded)
 }
@@ -368,7 +360,7 @@ func (a *Adapter) CreateRefund(ctx context.Context, req domain.RefundRequest) (d
 
 // createPayout performs the two provider calls and returns the payout id.
 func (a *Adapter) createPayout(ctx context.Context, name string, amount money.Money, destination string) (string, error) {
-	if _, err := a.decimalsFor(amount.Asset); err != nil {
+	if _, err := a.ensureAmountScale(amount); err != nil {
 		return "", err
 	}
 	pullBody := map[string]any{
@@ -415,6 +407,20 @@ func (a *Adapter) decimalsFor(asset string) (uint32, error) {
 	scale, ok := a.decimals[strings.ToUpper(strings.TrimSpace(asset))]
 	if !ok {
 		return 0, fmt.Errorf("%w: asset %q is outside the configured capabilities", domain.ErrRejected, asset)
+	}
+	return scale, nil
+}
+
+// ensureAmountScale rejects an amount whose scale differs from the configured
+// asset scale: rendering it would mis-price the provider invoice by a power of
+// ten (17.7 review, mirror in both adapters).
+func (a *Adapter) ensureAmountScale(amount money.Money) (uint32, error) {
+	scale, err := a.decimalsFor(amount.Asset)
+	if err != nil {
+		return 0, err
+	}
+	if amount.Decimals != scale {
+		return 0, fmt.Errorf("%w: amount decimals %d do not match the asset scale %d", domain.ErrRejected, amount.Decimals, scale)
 	}
 	return scale, nil
 }
@@ -470,12 +476,23 @@ func (a *Adapter) request(ctx context.Context, method, path string, body any, no
 	}
 }
 
-// truncateText bounds a provider error excerpt.
+// truncateText bounds a provider error excerpt and replaces non-printable bytes
+// so a hostile provider cannot forge log lines (17.7 review).
 func truncateText(payload []byte) string {
 	const limit = 200
 	text := strings.TrimSpace(string(payload))
 	if len(text) > limit {
-		return text[:limit]
+		text = text[:limit]
 	}
-	return text
+	var builder strings.Builder
+	builder.Grow(len(text))
+	for i := 0; i < len(text); i++ {
+		b := text[i]
+		if b >= 0x20 && b <= 0x7e {
+			builder.WriteByte(b)
+		} else {
+			builder.WriteByte('.')
+		}
+	}
+	return builder.String()
 }

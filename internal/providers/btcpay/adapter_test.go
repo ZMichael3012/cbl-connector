@@ -152,6 +152,16 @@ func TestNewValidation(t *testing.T) {
 	})
 	require.Error(t, err, "an asset outside the configured capabilities is a business rejection")
 	assert.True(t, errors.Is(err, domain.ErrRejected), "got %v", err)
+
+	_, err = adapter.CreateInvoice(context.Background(), domain.CreateInvoiceRequest{
+		IdempotencyKey: "k",
+		PaymentID:      "order-1",
+		Amount:         money.Money{MinorUnits: 1, Asset: "BTC", Decimals: 0},
+		Network:        "btc",
+		ExpiresAt:      time.Now().UTC().Add(15 * time.Minute),
+	})
+	require.Error(t, err, "a scale mismatch must not reach the provider")
+	assert.True(t, errors.Is(err, domain.ErrRejected), "got %v", err)
 }
 
 func TestCreateInvoiceHappyPath(t *testing.T) {

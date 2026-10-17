@@ -6,8 +6,10 @@ normalization, the administrative routing contour.
 Service role and contracts: `AGENTS.md`. Global platform rules: `../../AGENTS.md`,
 `../../.specs/CBL-000-system-description.md`, `../../.specs/CBL-003-contracts.md`.
 
-E2E: the smoke run follows `test/e2e/E2E.md` (scenarios `E2E_Connector_Smoke` and
-`E2E_Connector_BTCPayProfile`; artifacts in `test/e2e/.runs/<UTC mark>/`).
+E2E: the smoke run follows `test/e2e/E2E.md` (scenarios `E2E_Connector_Smoke`,
+`E2E_Connector_BTCPayProfile`, `E2E_Connector_CoinGateProfile` and the local
+BTCPay regtest stand `E2E_Connector_BTCPayRegtest`; artifacts in
+`test/e2e/.runs/<UTC mark>/`).
 
 ## BTCPay adapter (17.9)
 
@@ -23,6 +25,20 @@ The adapter implements SPI v1 (hosted invoices, order lookup, `BTCPay-Sig` webho
 verification, pull payments for payouts/refunds) and passes the conformance suite
 (`internal/providers/btcpay/conformance_test.go`). The compose stand points it at the
 mock-gateway `btcpay` profile for the cross-service e2e.
+
+## CoinGate adapter (17.7)
+
+```
+CONNECTOR_PROVIDERS=coingate               # optional CSV allowlist of wired adapters
+CONNECTOR_COINGATE_BASE_URL=https://api.coingate.com
+CONNECTOR_COINGATE_API_TOKEN=...
+CONNECTOR_COINGATE_IPN_TOKEN=...           # token echo secret of the callbacks
+CONNECTOR_COINGATE_CAPABILITIES=[{"network":"usdt_trc20","asset":"USDT","min_minor":1000000,"decimals":6,"confirmations":2}]
+```
+
+Orders create/get, order lookup, token-echo verification and the provisional
+payout/refund shapes (17.11/17.12 own the real flows). The adapter passes the
+conformance suite and the compose scenario `E2E_Connector_CoinGateProfile`.
 
 ## Adapter conformance (17.5)
 

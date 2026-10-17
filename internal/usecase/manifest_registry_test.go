@@ -21,6 +21,10 @@ func TestManifestRegistryBuiltins(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "CoinGate", manifest.DisplayName)
 
+	manifest, ok = registry.Lookup("CoinGate")
+	require.True(t, ok)
+	require.Equal(t, "CoinGate", manifest.DisplayName)
+
 	_, ok = registry.Lookup("unknown")
 	require.False(t, ok)
 

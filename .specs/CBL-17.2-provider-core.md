@@ -90,13 +90,15 @@ cached capability snapshots pass a read-time validation against registered sourc
 route:config discipline); `provider_invoices` replays only a matching payment and request
 hash, a remap is a conflict; manifests of re-verifying providers require Vault secret
 references; `raw_status` is carried by the canonical event; a receipt-time regression test
-and a mapping-mismatch test were added. Increment 5 (review closed): the fetch mandate of
-CoinGate/BitPay is enforced through the manifest (`FetchMandatory`, token_echo requires it)
-and the normalizer predicate wired from the registry, with the provider key normalized before
-every lookup so casing cannot bypass the mandate. Review follow-ups recorded as pending
-scope: manifest base URL and the CoinGate orders/hour queue limit, credential-scoped limiter
-keys, the CF-4 `Capabilities` context fields (decimals, sandbox, supports_payouts/refunds)
-for the transport, and the `providers` table.
+and a mapping-mismatch test were added. Increment 5: the fetch mandate of CoinGate/BitPay is
+enforced through the manifest (`FetchMandatory`, token_echo requires it) and the normalizer
+predicate wired from the registry, with the provider key normalized before every lookup so
+casing cannot bypass the mandate (the registry normalizes keys too); process fact: two review
+passes ran before the commit, the remaining two on it, findings closed in the follow-up.
+Review follow-ups recorded as pending scope: manifest base URL and the CoinGate orders/hour
+queue limit, the BitPay mandate is data plus a built-in test (a raw_hmac manifest cannot be
+validated into it), credential-scoped limiter keys, the CF-4 `Capabilities` context fields
+(decimals, sandbox, supports_payouts/refunds) for the transport, and the `providers` table.
 
 ## 3. Work plan
 

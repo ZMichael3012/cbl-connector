@@ -27,20 +27,27 @@ func NewManifestRegistry(manifests ...domain.ProviderManifest) (*ManifestRegistr
 		if err := manifest.Validate(); err != nil {
 			return nil, fmt.Errorf("usecase: register manifest: %w", err)
 		}
-		if _, duplicate := registry.byID[manifest.ID]; duplicate {
+		key := normalizeProviderID(manifest.ID)
+		if _, duplicate := registry.byID[key]; duplicate {
 			return nil, fmt.Errorf("%w: provider %q is already registered", domain.ErrInvalidManifest, manifest.ID)
 		}
-		registry.byID[manifest.ID] = manifest
+		registry.byID[key] = manifest
 	}
 	return registry, nil
 }
 
-// Lookup returns the manifest of a provider.
+// Lookup returns the manifest of a provider; the id is normalized the same way
+// as on registration, so casing can never bypass manifest lookups.
 func (r *ManifestRegistry) Lookup(id string) (domain.ProviderManifest, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	manifest, ok := r.byID[strings.TrimSpace(id)]
+	manifest, ok := r.byID[normalizeProviderID(id)]
 	return manifest, ok
+}
+
+// normalizeProviderID normalizes provider identifiers of registry keys.
+func normalizeProviderID(id string) string {
+	return strings.ToLower(strings.TrimSpace(id))
 }
 
 // IDs returns the registered provider identifiers in a stable order; the

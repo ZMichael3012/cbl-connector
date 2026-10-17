@@ -60,12 +60,14 @@ occurred_at falls back to the receipt time), and without a registered fetcher, g
 mapping they fail closed into retry/DLQ. `main` wires the mapping repository; the fetcher
 arrives with the adapters 17.6 - 17.9.
 
-FR-6 (part 2, loader done). Capabilities loader: `usecase.CapabilitiesLoader` aggregates
+FR-6 (part 2, done). Capabilities loader: `usecase.CapabilitiesLoader` aggregates
 adapter capabilities through an injectable cache (Redis in production) with live fallback on
 a cache miss or error, provider filtering (`ErrProviderNotFound`), provider-qualified rows and
 stable ordering; `CapabilityCache` (Load/Save with TTL) and `CapabilitySource` ports keep the
-usecase infrastructure-free. Remaining: wiring into `GetCapabilities` with the Redis
-implementation and the `GetCapabilities` provider filter in the transport.
+usecase infrastructure-free; the Redis adapter is `storage.CapabilitiesCache` (JSON snapshot
+under `connector:capabilities:v1`, corruption is a read error, so the loader never trusts
+garbage) with a real-Redis integration test. Remaining: constructing the loader in `main`
+and serving the `GetCapabilities` provider filter once the transport step lands.
 
 FR-7 (part 2, limiter done). Per-provider limiter: `gateway.Limited` decorates any
 `PaymentGateway` with the kit `ratelimit` port (shared Redis bucket, local fallback), keys

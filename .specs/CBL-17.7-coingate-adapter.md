@@ -276,7 +276,7 @@ Red run recorded before implementation (17.10.2026):
 `github.com/cbl/cbl-connector/internal/providers/coingate: no non-test Go files`
 and the same for `internal/providers/wire`; the existing suites stayed green.
 After implementation: conformance `Run` green for the coingate fixtures, unit
-coverage total 86.9% (coingate package 82.4%), the cross-service scenario
+coverage total 87.0% (coingate package 83.3%), the cross-service scenario
 `E2E_Connector_CoinGateProfile` PASS (mark `20261017t074107z`), integration and
 e2e regression runs green, lint 0. Review closure round: findings of the four
 reviewers on the increment diff closed before the commit (recorded in the task

@@ -28,15 +28,18 @@ const (
 	limitOperationInvoice = "invoice"
 	limitOperationStatus  = "status"
 	limitOperationPayout  = "payout"
+	limitOperationRefund  = "refund"
 )
 
 // providerLimitOperations lists the buckets paused on a provider-wide
 // Retry-After.
-var providerLimitOperations = []string{limitOperationInvoice, limitOperationStatus, limitOperationPayout}
+var providerLimitOperations = []string{limitOperationInvoice, limitOperationStatus, limitOperationPayout, limitOperationRefund}
 
 // Limited guards provider calls with the per-provider token bucket (17.2,
 // COMMON-2): a denied token returns ErrProviderOverloaded without touching the
 // adapter, and a provider Retry-After answer is honored through PauseProvider.
+// It forwards the optional SPI v1 interfaces: the assertions succeed and the
+// wrapped gateway reports whether it really supports the operation.
 type Limited struct {
 	next    domain.PaymentGateway
 	limiter Limiter
@@ -93,6 +96,32 @@ func (l *Limited) VerifyWebhook(headers map[string][]string, rawBody []byte) (do
 	return l.next.VerifyWebhook(headers, rawBody)
 }
 
+// LookupByOrderID implements the optional SPI v1 interface: the wrapped gateway
+// reports ErrRejected when it does not support the recovery lookup.
+func (l *Limited) LookupByOrderID(ctx context.Context, orderID string) (domain.PaymentStatus, error) {
+	lookup, ok := l.next.(domain.LookupGateway)
+	if !ok {
+		return domain.PaymentStatus{}, fmt.Errorf("%w: provider %q does not support the order lookup", domain.ErrRejected, l.key)
+	}
+	if err := l.guard(ctx, limitOperationStatus); err != nil {
+		return domain.PaymentStatus{}, err
+	}
+	return lookup.LookupByOrderID(ctx, orderID)
+}
+
+// CreateRefund implements the optional SPI v1 interface: the wrapped gateway
+// reports ErrRejected when it has no refunds API (the manual path, decision 8).
+func (l *Limited) CreateRefund(ctx context.Context, req domain.RefundRequest) (domain.Refund, error) {
+	refunder, ok := l.next.(domain.Refunder)
+	if !ok {
+		return domain.Refund{}, fmt.Errorf("%w: provider %q does not support refunds", domain.ErrRejected, l.key)
+	}
+	if err := l.guard(ctx, limitOperationRefund); err != nil {
+		return domain.Refund{}, err
+	}
+	return refunder.CreateRefund(ctx, req)
+}
+
 // Capabilities implements the port without a token: it is a local read.
 func (l *Limited) Capabilities() domain.Capabilities {
 	return l.next.Capabilities()
@@ -116,7 +145,8 @@ func (l *Limited) PauseProvider(ctx context.Context, d time.Duration) error {
 // guard consumes a token of the operation bucket. A limiter failure is
 // fail-open by design: the limiter protects the provider (a lost token risks a
 // provider 429, which PauseProvider then absorbs), and it must never block the
-// money path on its own storage problem.
+// money path on its own storage problem. The error is swallowed only here; the
+// wiring layer observes it through the kit metrics port.
 func (l *Limited) guard(ctx context.Context, operation string) error {
 	decision, err := l.limiter.Allow(ctx, l.key+":"+operation)
 	if err != nil {

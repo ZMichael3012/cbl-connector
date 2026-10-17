@@ -8,7 +8,7 @@
 | Wave and parallel group | W5-PROVIDER, stage B |
 | Depends on | CF-4 (`cbl-protos@cf-4`/`cf-4.1`), `cbl-kit` 7900510 (`webhooksig`, `ratelimit`, `money` parsing) |
 | Contract version | consumes `cbl-protos@cf-4.1`, `cbl-kit` 7900510 |
-| Status | in progress (part 1 done, part 2 pending) |
+| Status | in progress: FR-1 - FR-7 delivered and reviewed; the ConnectorService transport, the main wiring (limiters from manifests, capabilities loader, fetcher) and FR-8 remain |
 
 ## 1. Context and goal
 
@@ -77,8 +77,24 @@ storage failure fails open (the provider 429 is absorbed by `PauseProvider`, whi
 invoice/status/payout buckets with the provider `Retry-After`). Remaining: manifest-limit
 wiring in main and the `ConnectorService` gRPC transport over the Router.
 
-FR-8 (part 2). `providers` table and admin visibility (17.15 consumes it); payout/refund
-operations surface through `ConnectorService` once adapters exist (17.6 - 17.9, 17.11).
+FR-8 (part 2, NOT STARTED). `providers` table and admin visibility (17.15 consumes it);
+payout/refund operations surface through `ConnectorService` once adapters exist
+(17.6 - 17.9, 17.11).
+
+Review closure (4 reviewers, 16.10.2026, covering commits 6f04569 - 6a3555a): findings closed
+in increment 4: occurred_at anchors on the receipt time and fails closed without any event
+time (T-CONNECTOR-05); the fetched status PaymentID is reconciled with the invoice mapping and
+a contradiction goes to the DLQ; `gateway.Limited` forwards the optional SPI v1 interfaces
+(`LookupGateway`, `Refunder`) with a refund bucket and reports unsupported operations;
+cached capability snapshots pass a read-time validation against registered sources (the
+route:config discipline); `provider_invoices` replays only a matching payment and request
+hash, a remap is a conflict; manifests of re-verifying providers require Vault secret
+references; `raw_status` is carried by the canonical event; a receipt-time regression test
+and a mapping-mismatch test were added. Review follow-ups recorded as pending scope:
+enforcement of the fetch mandate for CoinGate/BitPay via the registry (the ingress flag is
+relied on today), manifest base URL and the CoinGate orders/hour queue limit,
+credential-scoped limiter keys, the CF-4 `Capabilities` context fields (decimals, sandbox,
+supports_payouts/refunds) for the transport, and the `providers` table.
 
 ## 3. Work plan
 

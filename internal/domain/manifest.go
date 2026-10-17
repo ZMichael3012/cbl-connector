@@ -102,9 +102,15 @@ func (m ProviderManifest) Validate() error {
 		if strings.TrimSpace(m.VerifyHeader) == "" {
 			return fmt.Errorf("%w: provider %q: %s requires verify_header", ErrInvalidManifest, m.ID, m.VerifyStrategy)
 		}
+		if err := m.validateSecrets(); err != nil {
+			return err
+		}
 	case VerifyStrategyTokenEcho:
 		if strings.TrimSpace(m.VerifyField) == "" {
 			return fmt.Errorf("%w: provider %q: token_echo requires verify_field", ErrInvalidManifest, m.ID)
+		}
+		if err := m.validateSecrets(); err != nil {
+			return err
 		}
 	case VerifyStrategyNone:
 		// The ingress signature_state stays the only verification (mock raws).
@@ -133,6 +139,17 @@ func (m ProviderManifest) Validate() error {
 		}
 	} else if m.RateLimit.RefillInterval != 0 {
 		return fmt.Errorf("%w: provider %q: refill interval without burst", ErrInvalidManifest, m.ID)
+	}
+	return nil
+}
+
+// validateSecrets checks the Vault references of a re-verifying provider: a
+// provider that cannot read its secret can never verify a raw webhook
+// (T-CONNECTOR-01), so the manifest must reference one.
+func (m ProviderManifest) validateSecrets() error {
+	if strings.TrimSpace(m.SecretPath) == "" || len(m.SecretKeys) == 0 {
+		return fmt.Errorf("%w: provider %q with strategy %s requires secret_path and secret_keys",
+			ErrInvalidManifest, m.ID, m.VerifyStrategy)
 	}
 	return nil
 }

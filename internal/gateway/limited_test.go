@@ -139,6 +139,7 @@ func TestLimitedPauseProvider(t *testing.T) {
 		"coingate:invoice": 30 * time.Second,
 		"coingate:status":  30 * time.Second,
 		"coingate:payout":  30 * time.Second,
+		"coingate:refund":  30 * time.Second,
 	}, limiter.paused)
 
 	limiter.pauseErr = errors.New("redis down")

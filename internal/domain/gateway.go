@@ -130,6 +130,8 @@ type PaymentStatus struct {
 	Provider string
 	// State sets the canonical status.
 	State State
+	// RawStatus keeps the provider status string untouched (CF-4 raw_status).
+	RawStatus string
 	// ReceivedAmount sets the received amount.
 	ReceivedAmount money.Money
 	// Confirmations sets the confirmation depth.
@@ -152,6 +154,9 @@ type CanonicalEvent struct {
 	GatewayID string
 	// Provider sets the provider name.
 	Provider string
+	// RawStatus keeps the provider status string untouched (CF-4 raw_status)
+	// for reconciliation, reporting and support.
+	RawStatus string
 	// TXID sets the transaction hash.
 	TXID string
 	// Network sets the network.
@@ -171,6 +176,7 @@ const (
 	maxTXIDLen      = 256
 	maxNetworkLen   = 64
 	maxProviderLen  = 64
+	maxRawStatusLen = 64
 	minAssetLen     = 2
 	maxAssetLen     = 16
 )
@@ -196,6 +202,9 @@ func (e CanonicalEvent) Validate() error {
 	}
 	if e.TXID != "" && !validPrintable(e.TXID, maxTXIDLen) {
 		return fmt.Errorf("%w: invalid txid", ErrInvalidWebhook)
+	}
+	if e.RawStatus != "" && !validPrintable(e.RawStatus, maxRawStatusLen) {
+		return fmt.Errorf("%w: invalid raw_status", ErrInvalidWebhook)
 	}
 	if e.Network != "" && !validCode(e.Network, maxNetworkLen) {
 		return fmt.Errorf("%w: invalid network", ErrInvalidWebhook)
@@ -379,6 +388,11 @@ type ProviderInvoice struct {
 
 // ErrInvalidProviderInvoice reports an invalid provider invoice mapping.
 var ErrInvalidProviderInvoice = errors.New("connector: invalid provider invoice mapping")
+
+// ErrProviderInvoiceConflict reports a gateway id already mapped to another
+// payment: silently remapping the invoice would attribute events to a wrong
+// platform payment.
+var ErrProviderInvoiceConflict = errors.New("connector: provider invoice mapping conflict")
 
 // Validate checks the mapping invariants before it reaches the storage.
 func (m ProviderInvoice) Validate() error {

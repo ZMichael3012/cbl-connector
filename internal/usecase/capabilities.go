@@ -89,8 +89,13 @@ func (l *CapabilitiesLoader) List(ctx context.Context, provider string) ([]domai
 		if err != nil {
 			l.log.Warn("capabilities cache read failed", zap.Error(err))
 		} else if found {
-			l.remember(cached)
-			return cached, nil
+			if l.cachedSnapshotTrusted(cached) {
+				l.remember(cached)
+				return cached, nil
+			}
+			// A semantically corrupted payload (forged providers) is treated as
+			// a miss: the cache is never trusted over the registered sources.
+			l.log.Warn("capabilities cache payload rejected", zap.Int("rows", len(cached)))
 		}
 	}
 	aggregated := make([]domain.Capabilities, 0, len(l.sources))
@@ -106,6 +111,26 @@ func (l *CapabilitiesLoader) List(ctx context.Context, provider string) ([]domai
 		}
 	}
 	return aggregated, nil
+}
+
+// cachedSnapshotTrusted checks a cached snapshot before serving it: every row
+// must carry a valid provider that is registered as a source, and the row set
+// must not be empty. Semantically corrupted payloads fall back to live sources
+// (the route:config read-time validation discipline, T-CONNECTOR-08).
+func (l *CapabilitiesLoader) cachedSnapshotTrusted(cached []domain.Capabilities) bool {
+	if len(cached) == 0 {
+		return false
+	}
+	registered := make(map[string]struct{}, len(l.sources))
+	for _, source := range l.sources {
+		registered[strings.TrimSpace(source.Provider())] = struct{}{}
+	}
+	for _, row := range cached {
+		if _, ok := registered[row.Provider]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // Snapshot returns the last aggregated view without touching the cache; a

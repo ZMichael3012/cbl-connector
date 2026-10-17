@@ -183,7 +183,9 @@ func (n *Normalizer) decodeCanonical(ctx context.Context, raw *eventsv1.GatewayW
 
 // fetchCanonical builds the canonical event from the provider status re-check:
 // fetch_required deliveries must never be trusted from the body, and without an
-// adapter the delivery fails closed (the status model decides, 3.4).
+// adapter the delivery fails closed (the status model decides, 3.4). The
+// platform payment is reconciled with the invoice mapping: a status PaymentID
+// that contradicts the mapping is a mismatch and goes to the DLQ.
 func (n *Normalizer) fetchCanonical(ctx context.Context, raw *eventsv1.GatewayWebhookRaw, provider string) (domain.CanonicalEvent, error) {
 	if n.fetcher == nil {
 		return domain.CanonicalEvent{}, fmt.Errorf("%w: provider %q requires fetch but no adapter is registered", domain.ErrProviderUnavailable, provider)
@@ -196,28 +198,58 @@ func (n *Normalizer) fetchCanonical(ctx context.Context, raw *eventsv1.GatewayWe
 	if err != nil {
 		return domain.CanonicalEvent{}, fmt.Errorf("usecase: fetch payment status for provider %q: %w", provider, err)
 	}
-	paymentID := strings.TrimSpace(status.PaymentID)
-	if paymentID == "" {
-		paymentID, err = n.resolvePayment(ctx, provider, gatewayID)
-		if err != nil {
-			return domain.CanonicalEvent{}, err
-		}
+	paymentID, err := n.reconcilePayment(ctx, provider, gatewayID, status.PaymentID)
+	if err != nil {
+		return domain.CanonicalEvent{}, err
 	}
 	occurredAt := status.GatewayEventTS
 	if occurredAt.IsZero() {
-		occurredAt = time.Now().UTC()
+		// The receipt time is the ordering anchor: a fabricated "now" would let
+		// a retried delivery outrun later states (T-CONNECTOR-05). AsTime on an
+		// unset timestamp returns the epoch, so the presence is checked first.
+		receipt := raw.GetReceivedAt()
+		if receipt == nil {
+			return domain.CanonicalEvent{}, fmt.Errorf("%w: provider %q has no event time", domain.ErrInvalidWebhook, provider)
+		}
+		occurredAt = receipt.AsTime()
 	}
 	return domain.CanonicalEvent{
 		Type:           status.State,
 		PaymentID:      paymentID,
 		GatewayID:      gatewayID,
 		Provider:       provider,
+		RawStatus:      status.RawStatus,
 		TXID:           status.TXID,
 		Network:        status.Network,
 		ReceivedAmount: status.ReceivedAmount,
 		Confirmations:  status.Confirmations,
 		OccurredAt:     occurredAt,
 	}, nil
+}
+
+// reconcilePayment attributes the fetched status to a platform payment: the
+// invoice mapping is authoritative, an adapter-provided id must either match it
+// or stand alone when no mapping is configured, and a contradiction fails closed.
+func (n *Normalizer) reconcilePayment(ctx context.Context, provider, gatewayID, adapterPaymentID string) (string, error) {
+	mapped := ""
+	if n.mapping != nil {
+		resolved, err := n.resolvePayment(ctx, provider, gatewayID)
+		if err != nil {
+			return "", err
+		}
+		mapped = resolved
+	}
+	adapterPaymentID = strings.TrimSpace(adapterPaymentID)
+	switch {
+	case mapped != "" && adapterPaymentID != "" && mapped != adapterPaymentID:
+		return "", fmt.Errorf("%w: provider %q status payment contradicts the mapping", domain.ErrInvalidWebhook, provider)
+	case mapped != "":
+		return mapped, nil
+	case adapterPaymentID != "":
+		return adapterPaymentID, nil
+	default:
+		return "", fmt.Errorf("%w: provider %q status carries no payment and no mapping is configured", domain.ErrInvalidWebhook, provider)
+	}
 }
 
 // resolvePayment resolves the platform payment through the provider invoice
@@ -245,6 +277,7 @@ func buildCanonicalEnvelope(event domain.CanonicalEvent, incoming map[string]str
 		GatewayId: event.GatewayID,
 		Provider:  event.Provider,
 		Type:      canonicalEventType(event.Type),
+		RawStatus: event.RawStatus,
 		ReceivedAmount: &commonv1.Money{
 			MinorUnits: event.ReceivedAmount.MinorUnits,
 			Asset:      event.ReceivedAmount.Asset,

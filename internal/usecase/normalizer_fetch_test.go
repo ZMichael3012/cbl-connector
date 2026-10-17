@@ -8,6 +8,7 @@ import (
 
 	eventsv1 "github.com/cbl/cbl-protos/gen/go/billing/events/v1"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/cbl/cbl-kit/money"
 
@@ -109,10 +110,37 @@ func TestFetchCanonicalOccurredAtFallback(t *testing.T) {
 		ReceivedAmount: money.MustParse("1", "BTC", 8),
 	}}
 	normalizer := newFetchNormalizer(t, nil, fetcher)
-	raw := &eventsv1.GatewayWebhookRaw{Provider: "coingate", GatewayId: "order-1", FetchRequired: true}
+	receipt := time.Date(2026, 10, 16, 11, 0, 0, 0, time.UTC)
+	raw := &eventsv1.GatewayWebhookRaw{
+		Provider:      "coingate",
+		GatewayId:     "order-1",
+		FetchRequired: true,
+		ReceivedAt:    timestamppb.New(receipt),
+	}
 	event, err := normalizer.fetchCanonical(context.Background(), raw, "coingate")
 	require.NoError(t, err)
-	require.False(t, event.OccurredAt.IsZero())
+	require.Equal(t, receipt, event.OccurredAt, "a retried delivery must keep the receipt time, not the wall clock")
+
+	// Without any event time the delivery fails closed instead of inventing one.
+	noTime := &eventsv1.GatewayWebhookRaw{Provider: "coingate", GatewayId: "order-1", FetchRequired: true}
+	_, err = normalizer.fetchCanonical(context.Background(), noTime, "coingate")
+	require.ErrorIs(t, err, domain.ErrInvalidWebhook)
+}
+
+func TestFetchCanonicalMappingMismatchFailsClosed(t *testing.T) {
+	t.Parallel()
+	mapping := &fakeMapping{invoice: domain.ProviderInvoice{PaymentID: "018f8f5c-3f7a-7b2e-9c4d-2a1b3c4d0001"}}
+	fetcher := &fakeFetcher{status: domain.PaymentStatus{
+		PaymentID:      "018f8f5c-3f7a-7b2e-9c4d-2a1b3c4d0002",
+		State:          domain.StateDetected,
+		ReceivedAmount: money.MustParse("1", "BTC", 8),
+		GatewayEventTS: time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC),
+	}}
+	normalizer := newFetchNormalizer(t, mapping, fetcher)
+	raw := &eventsv1.GatewayWebhookRaw{Provider: "coingate", GatewayId: "order-1", FetchRequired: true}
+
+	_, err := normalizer.fetchCanonical(context.Background(), raw, "coingate")
+	require.ErrorIs(t, err, domain.ErrInvalidWebhook, "a status payment contradicting the mapping must not be attributed")
 }
 
 func TestFetchCanonicalFailsClosed(t *testing.T) {
@@ -140,6 +168,7 @@ func TestFetchCanonicalResolvesPaymentViaMapping(t *testing.T) {
 	fetcher := &fakeFetcher{status: domain.PaymentStatus{
 		State:          domain.StateDetected,
 		ReceivedAmount: money.MustParse("1", "BTC", 8),
+		GatewayEventTS: time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC),
 	}}
 	normalizer := newFetchNormalizer(t, mapping, fetcher)
 	raw := &eventsv1.GatewayWebhookRaw{Provider: "coingate", GatewayId: "order-1", FetchRequired: true}

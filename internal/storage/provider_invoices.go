@@ -64,6 +64,14 @@ func (r *ProviderInvoicesRepository) Save(ctx context.Context, invoice domain.Pr
 	if err != nil {
 		return domain.ProviderInvoice{}, false, err
 	}
+	// A gateway id may not be reused for another payment: a retried creation of
+	// the same invoice (same payment and request hash) replays, anything else is
+	// a conflict and must not silently remap the invoice.
+	if stored.PaymentID != invoice.PaymentID || stored.RequestHash != invoice.RequestHash {
+		return domain.ProviderInvoice{}, false, fmt.Errorf(
+			"%w: provider %q gateway %q is mapped to another payment",
+			domain.ErrProviderInvoiceConflict, invoice.Provider, invoice.GatewayID)
+	}
 	return stored, false, nil
 }
 
@@ -73,11 +81,13 @@ func (r *ProviderInvoicesRepository) ByGatewayID(ctx context.Context, provider, 
 }
 
 // ByOrderID resolves the mapping by the order reference sent to the provider;
-// it serves the invoice recovery after a create timeout (LookupByOrderID).
+// it serves the invoice recovery after a create timeout (LookupByOrderID). The
+// index is not unique, so the oldest mapping of the order wins deterministically.
 func (r *ProviderInvoicesRepository) ByOrderID(ctx context.Context, provider, orderID string) (domain.ProviderInvoice, error) {
 	var row ProviderInvoiceRow
 	err := r.db.WithContext(ctx).
 		Where("provider = ? AND order_id = ?", provider, orderID).
+		Order("created_at ASC, id ASC").
 		First(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return domain.ProviderInvoice{}, fmt.Errorf("%w: provider %q order %q", ErrProviderInvoiceNotFound, provider, orderID)

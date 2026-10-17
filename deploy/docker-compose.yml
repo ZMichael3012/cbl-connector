@@ -83,6 +83,20 @@ services:
         done
     networks: [cbl-net]
 
+  mock-gateway:
+    profiles: ["app"]
+    build:
+      context: ../..
+      dockerfile: cbl-mock-gateway/Dockerfile
+    environment:
+      HTTP_ADDR: ":8120"
+      METRICS_ADDR: ":9320"
+      # The stand webhook target is unused by the adapter scenario (the
+      # simulate delivery may end as a recorded network error, which is fine).
+      WEBHOOK_TARGET_URL: "http://connector:8050/hooks/mock/ep1"
+    ports: ["8120:8120"]
+    networks: [cbl-net]
+
   connector:
     profiles: ["app"]
     build:
@@ -97,6 +111,13 @@ services:
       KAFKA_CONSUMER_GROUP: cbl-connector-webhooks
       CONNECTOR_SANDBOX_PROVIDERS: mock
       REDIS_ADDR: redis:6379
+      # Stand-only placeholders: production injects the CONNECTOR_BTCPAY_* values
+      # from Vault (the manifest declares secret/cbl/{env}/btcpay).
+      CONNECTOR_BTCPAY_BASE_URL: http://mock-gateway:8120
+      CONNECTOR_BTCPAY_STORE_ID: mock-store
+      CONNECTOR_BTCPAY_API_TOKEN: mock-token
+      CONNECTOR_BTCPAY_WEBHOOK_SECRET: mock-btcpay-secret
+      CONNECTOR_BTCPAY_CAPABILITIES: '[{"network":"btc","asset":"BTC","min_minor":10000,"decimals":8,"confirmations":2}]'
     ports:
       - "8050:8050"
       - "9050:9050"

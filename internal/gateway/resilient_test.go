@@ -15,6 +15,8 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 
+	"github.com/cbl/cbl-kit/money"
+
 	"github.com/cbl/cbl-connector/internal/domain"
 )
 
@@ -655,4 +657,116 @@ func TestBackoffPolicyShape(t *testing.T) {
 	assert.Equal(t, time.Second, policy.MaxInterval)
 	assert.Zero(t, policy.RandomizationFactor)
 	assert.Zero(t, policy.MaxElapsedTime)
+}
+
+// LookupByOrderID performs a fake lookup call.
+func (g *fakeGateway) LookupByOrderID(ctx context.Context, orderID string) (domain.PaymentStatus, error) {
+	if err := g.next(ctx); err != nil {
+		return domain.PaymentStatus{}, err
+	}
+	return domain.PaymentStatus{GatewayID: orderID, Provider: "coingate", State: domain.StateDetected}, nil
+}
+
+// CreateRefund performs a fake refund call.
+func (g *fakeGateway) CreateRefund(ctx context.Context, req domain.RefundRequest) (domain.Refund, error) {
+	if err := g.next(ctx); err != nil {
+		return domain.Refund{}, err
+	}
+	return domain.Refund{GatewayRefundID: "refund-1", Provider: "coingate", Amount: req.Amount}, nil
+}
+
+func TestResilientForwardsLookupAndRefund(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.MaxAttempts = 1
+	inner := &fakeGateway{capability: domain.Capabilities{Provider: "coingate"}}
+	resilient, _ := newTestResilient(t, inner, cfg)
+	assert.Equal(t, "coingate", resilient.Provider())
+
+	status, err := resilient.LookupByOrderID(context.Background(), "order-1")
+	require.NoError(t, err)
+	assert.Equal(t, "order-1", status.GatewayID)
+
+	refund, err := resilient.CreateRefund(context.Background(), domain.RefundRequest{
+		IdempotencyKey: "k-1",
+		Amount:         money.MustParse("0.5", "BTC", 8),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "refund-1", refund.GatewayRefundID)
+
+	_, err = resilient.CreateRefund(context.Background(), domain.RefundRequest{Amount: money.MustParse("0.5", "BTC", 8)})
+	require.ErrorIs(t, err, domain.ErrInvalidGatewayRequest, "a refund without an idempotency key fails fast")
+}
+
+func TestResilientMissingOptionalCapabilityRejected(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.MaxAttempts = 1
+	resilient, _ := newTestResilient(t, &bareGateway{}, cfg)
+
+	_, err := resilient.LookupByOrderID(context.Background(), "order-1")
+	require.ErrorIs(t, err, domain.ErrRejected, "lookup without the capability is a business rejection")
+
+	_, err = resilient.CreateRefund(context.Background(), domain.RefundRequest{IdempotencyKey: "k-1"})
+	require.ErrorIs(t, err, domain.ErrRejected, "refund without the capability is a business rejection")
+}
+
+func TestResilientBreakerIgnoresGatewayNotFound(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.MaxAttempts = 1
+	cfg.BreakerFailureThreshold = 2
+	inner := &fakeGateway{errs: []error{
+		fmt.Errorf("%w: missing", domain.ErrGatewayNotFound),
+		fmt.Errorf("%w: missing", domain.ErrGatewayNotFound),
+		fmt.Errorf("%w: missing", domain.ErrGatewayNotFound),
+	}}
+	resilient, _ := newTestResilient(t, inner, cfg)
+
+	for i := 0; i < 3; i++ {
+		_, err := resilient.GetPayment(context.Background(), "gw-1")
+		require.ErrorIs(t, err, domain.ErrGatewayNotFound, "read miss %d", i)
+	}
+	assert.Equal(t, gobreaker.StateClosed, resilient.breaker.State(),
+		"a read miss must not trip the breaker for all merchants")
+
+	status, err := resilient.GetPayment(context.Background(), "gw-1")
+	require.NoError(t, err, "the provider is healthy, calls continue")
+	assert.Equal(t, domain.StateDetected, status.State)
+}
+
+// bareGateway implements only the core PaymentGateway without the optional SPI.
+type bareGateway struct{}
+
+// CreateInvoice is a placeholder.
+func (bareGateway) CreateInvoice(context.Context, domain.CreateInvoiceRequest) (domain.Invoice, error) {
+	return domain.Invoice{}, nil
+}
+
+// GetPayment is a placeholder.
+func (bareGateway) GetPayment(context.Context, string) (domain.PaymentStatus, error) {
+	return domain.PaymentStatus{}, nil
+}
+
+// VerifyWebhook is a placeholder.
+func (bareGateway) VerifyWebhook(map[string][]string, []byte) (domain.CanonicalEvent, error) {
+	return domain.CanonicalEvent{}, nil
+}
+
+// CreatePayout is a placeholder.
+func (bareGateway) CreatePayout(context.Context, domain.PayoutRequest) (domain.Payout, error) {
+	return domain.Payout{}, nil
+}
+
+// GetPayout is a placeholder.
+func (bareGateway) GetPayout(context.Context, string) (domain.PayoutStatus, error) {
+	return domain.PayoutStatus{}, nil
+}
+
+// Capabilities is a placeholder.
+func (bareGateway) Capabilities() domain.Capabilities {
+	return domain.Capabilities{Provider: "bare"}
 }

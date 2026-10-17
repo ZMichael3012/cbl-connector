@@ -8,7 +8,8 @@ The em dash (U+2014) is forbidden, only the hyphen is used.
 
 ## 1. Boundaries
 
-In scope: the PaymentGateway interface, provider adapters, circuit breaker, event normalization.
+In scope: the PaymentGateway interface, provider adapters (`internal/providers/*`),
+circuit breaker, event normalization, the administrative routing contour.
 
 Out of scope: other platform services; interaction only via `cbl-protos` contracts
 (gRPC), Kafka and the perimeter REST (see `CBL-000`, section 2).
@@ -44,6 +45,13 @@ adapter (including future ones) must pass; it drives an adapter against provider
 fixtures (`Fixtures`) through the `CONF-1..CONF-10` checks (`Run`, `RunChecks`), builds
 verification strategies from manifests (`StrategyFromManifest`, `SignBody`) and proves
 itself with meta-tests (compliant adapter passes, mutants fail exactly one check).
+BTCPay adapter (17.9): `internal/providers/btcpay` implements SPI v1 (PaymentGateway,
+LookupGateway, Refunder) against the Greenfield API (hosted invoices, order lookup,
+`BTCPay-Sig` webhooks, pull payments for payouts and refunds); main wires it from the
+`CONNECTOR_BTCPAY_*` environment into the gateways map, the interim static selector
+(`usecase.NewStaticSelector`, replaced by the rule-based routing of 17.17), the
+capabilities loader (the adapter satisfies `usecase.CapabilitySource`) and the
+normalizer fetch-to-verify bridge (`usecase.NewGatewayStatusFetcher`).
 Libraries: the standard `CBL-002` set (Gin, GORM + pgx driver, franz-go + pkg/sr, go-redis,
 goose, zap). `AutoMigrate` is forbidden, migrations are goose only, forward only.
 
@@ -75,6 +83,12 @@ Provider resilience (3.3, default values): `CONNECTOR_RETRY_MAX_ATTEMPTS` (3),
 `CONNECTOR_PROVIDER_ATTEMPT_TIMEOUT` (overrides per-method timeouts).
 Routing (3.4): `CONNECTOR_ROUTE_CACHE_TTL` (`route:config` cache TTL, 30 - 60 s),
 `REDIS_PASSWORD` (Redis password, if enabled).
+BTCPay adapter (17.9): `CONNECTOR_BTCPAY_BASE_URL` (Greenfield root; unset keeps the
+runtime fail-closed), `CONNECTOR_BTCPAY_STORE_ID`, `CONNECTOR_BTCPAY_API_TOKEN`,
+`CONNECTOR_BTCPAY_WEBHOOK_SECRET`, `CONNECTOR_BTCPAY_CAPABILITIES` (JSON list of
+`{"network","asset","min_minor","max_minor","decimals","confirmations"}` rows),
+`CONNECTOR_BTCPAY_TIMEOUT` (default 10s). The compose stand points the adapter at the
+mock-gateway `btcpay` profile.
 
 ## 6. Development rules
 
@@ -111,15 +125,19 @@ consumer lag; dashboards after task 0.7.
 | T-CONNECTOR-08 | Routing rules: the source of truth is PostgreSQL, Redis `route:config` is a cache with a 30 - 60 s TTL and a fallback; a semantically corrupted payload (weight 0) counts as a miss | a Redis failure does not affect selection; cache poisoning does not reach the router (validation + weight guard) | rules from the cache require read-time validation; the cache staleness window applies to admin changes too | the admin path is implemented in 12.2 (revision + disabled set, T-CONNECTOR-10); invalidation on every admin write plus the TTL bound staleness |
 | T-CONNECTOR-09 | Concurrent rule `Save` operations are serialized by an advisory lock; the cache staleness window during a Load/Save race is bounded by TTL (≤ 60 s); a half-open provider participates in selection again, excess probes are rejected | replace-all without merging configurations; provider recovery without manual intervention | automatic failover to another provider is not performed; staleness window up to 60 s | failover is a separate task after 3.2; the admin path adds the configuration revision (12.2) |
 | T-CONNECTOR-10 | Admin contour (12.2): the revision lives in `routing_config` (a single row, advisory lock + `FOR UPDATE`); the disabled set is persisted in `disabled_providers` and applied by filtering the rule source (the router is untouched); `ConnectorAdminService` is a separate gRPC service so the money-path `ConnectorService` server interface and its fakes stay source-compatible; the back-office is the only client and enforces RBAC and audit | optimistic concurrency between operators; cache consistency via invalidation on every attempt plus the TTL; the exclusion is visible in `Load` | the admin RPCs have no authN inside the trusted network (mTLS - 0.6) and mutate the money routing: port 9050 must not leave the trusted zone (KI-connector-03) | provider enable is an additive follow-up (KI-connector-09); disabled rows have no retention yet |
-| T-CONNECTOR-11 | Provider manifests are versioned data (schema v1) and the SPI stays a set of small Go interfaces (core port plus optional `LookupGateway`/`Refunder`), added instead of widening `PaymentGateway` | the core and the existing fakes stay source-compatible; adding a provider touches only its adapter package, manifest and mapping (functional extensibility guarantee, plan 14.5) | optional interfaces need type assertions at the use sites; a manifest schema change needs a versioned migration of the catalogue | the manifest validation is centralized in `BuiltinManifests`/`Validate`; a new schema version is introduced with the onboarding kit (17.22) |
+| T-CONNECTOR-11 | Provider manifests are versioned data (schema v1) and the SPI stays a set of small Go interfaces (core port plus optional `LookupGateway`/`Refunder`), added instead of widening `PaymentGateway` | the core and the existing fakes stay source-compatible; adding a provider touches only its adapter package, manifest and mapping (functional extensibility guarantee, plan 14.5) | optional interfaces need type assertions at the use sites; a manifest schema change needs a versioned migration of the catalogue; provider-specific composition wiring currently lives in `cmd/connector` and repeats per adapter | the manifest validation is centralized in `BuiltinManifests`/`Validate`; the catalog artifact (17.21) and the runtime seam plus onboarding kit (17.20/17.22) standardize the wiring |
 | T-CONNECTOR-12 | The adapter conformance suite is an internal testkit (`internal/conformance`) whose fixtures mirror the mock-gateway profiles instead of importing them; the suite must be passed by every adapter (plan 14.5.8, checklist 14.4) | one contract for all current and future adapters; the meta-tests prove the suite catches violating adapters and the signature/shape tests keep the fixtures self-consistent | the fixture mirror must be maintained by hand across two repositories; the suite tests cannot detect cross-repository drift by themselves | the wire shapes are fixed by the mock spec CBL-17.5 section 3.2; the mock side e2e and the 17.16 sandbox runs against live APIs detect drift |
+| T-CONNECTOR-13 | The interim provider selector (17.9) returns the registered gateway with the smallest provider id; the rule-based routing replaces it in 17.17 | the first adapter works end to end without pre-empting the 17.17 routing decisions; a single-adapter dev stand routes correctly | multi-provider selection ignores network/asset until 17.17, and the selector does not consult the routing rules or the disabled set: the admin disable is not a money-path kill-switch yet; the exposure is the dev/CI stand (BTCPay production hosting is postponed) | the selector is a core port (`domain.Router`); 17.17 swaps the implementation, adapters untouched; until then the disabled set must be enforced by disabling the adapter configuration |
+| T-CONNECTOR-16 | Resilience and limiter wiring (17.9): the adapter instance registered in the gateways map is wrapped by `gateway.Resilient` (shared knobs `CONNECTOR_RETRY_*`, `CONNECTOR_BREAKER_*`, `CONNECTOR_BULKHEAD_*`, `CONNECTOR_PROVIDER_ATTEMPT_TIMEOUT`) and forwards the optional SPI interfaces; the manifest rate limiter is wired when the manifest configures one (the BTCPay stand declares none) | plan 14.5.3 holds for the first real provider: every external call passes retries, breaker, bulkhead and attempt timeouts | `Resilient` always satisfies `LookupGateway`/`Refunder` (delegation errors when the inner adapter lacks the capability), so interface assertions on wrapped adapters are optimistic; conformance runs against the bare adapter | the fetch path (`GetPayment`) and lookups go through the same pipeline; provider-specific wiring lives in the composition root until the 17.20 runtime seam standardizes it |
+| T-CONNECTOR-14 | Adapter capabilities come from `CONNECTOR_BTCPAY_CAPABILITIES` until the catalog artifact (17.21) and the capabilities API source (17.0) land | the amount decimals and network rows are explicit per stand; no invented catalog entries | a misconfigured env row silently changes amount parsing thresholds; production needs the catalog | fail-fast parsing at startup (E-7); the manifest keeps `capabilities_source: api` as the target |
+| T-CONNECTOR-15 | BTCPay payouts and refunds use pull payments; approval flows and refund statuses stay in 17.11/17.12 | one provider operation covers payout and refund destinations; the regtest stand supports it | pull payments need an approval step before funds move (operations job) | `CreatePayout`/`CreateRefund` return the pull payment id; the approval state machine is 17.11, refund orchestration 17.12 |
 
 ## 9. Known issues
 
 | ID | Problem | Impact | Plan | Status |
 | :-- | :-- | :-- | :-- | :-- |
 | KI-connector-01 | CI and pre-commit are not configured | linters run manually | task 0.2 | open |
-| KI-connector-02 | No real provider adapter (KI-01) | normalization is verified by the sandbox decoder and e2e on testcontainers, not by a live gateway | E17 adapters 17.6 - 17.9 after the core: manifests and the invoice mapping landed in 17.2 part 1 | open |
+| KI-connector-02 | No real provider adapter for NOWPayments/CoinGate/BitPay | normalization of those providers is verified by the sandbox decoder and e2e on testcontainers | E17 adapters 17.6 - 17.8 after the core; the BTCPay adapter landed in 17.9 increment 1 (dev/CI contour, local stand pending) | open |
 | KI-connector-03 | No mTLS on the gRPC server (port 9050), now including the money-routing admin RPCs (`PutRoutingRules`, `DisableProvider`); the admin contour has no authN | do not expose port 9050 outside the trusted network: an unauthorized caller could reroute the platform | task 0.6 (mTLS); the back-office is the only intended client | open |
 | KI-connector-04 | No cleanup of published outbox (canonical payload) and old inbox records; raw webhook bodies live in the webhook-ingress outbox and Kafka retry/DLQ topics | tables and topics grow, including sensitive provider headers | retention task (0.4/14.x), ACL/retention DLQ (0.5/5.3) | open |
 | KI-connector-05 | Kit inbox: `x-error` is not truncated, a failed retry/DLQ publication is not parked, retries have no delay | with giant/broken events a redelivery storm is possible; in 3.5 bounded by field and body size limits | kit hardening (error truncation, parking, delays) - tasks 1.3-revision/14.2 | open |
@@ -145,7 +163,8 @@ consumer lag; dashboards after task 0.7.
 | CBL-17.2 (part 2, increment 4) | 2026-10-16 | done, review closed (retroactive 4x review of increments 1-3; findings closed: occurred_at uses the receipt time and fails closed without any event time, the adapter status PaymentID is reconciled with the invoice mapping (a mismatch goes to the DLQ), `gateway.Limited` forwards `LookupGateway`/`Refunder` with a refund bucket, cached capability snapshots are validated against registered sources, `provider_invoices` rejects a gateway id remapped to another payment (payment and request hash check), manifests of re-verifying providers require Vault secret references, `raw_status` added to the canonical event and status; unit, integration and e2e runs green) | `.specs/CBL-17.2-provider-core.md` | e0b81eb |
 | CBL-17.2 (part 2, increment 5) | 2026-10-17 | done, review closed (fetch mandate enforcement: manifest `FetchMandatory` with the token_echo validation and the CoinGate/BitPay built-ins, normalizer predicate `WithFetchMandatory` wired from the registry, the provider key normalized before every lookup so casing cannot bypass the mandate; process fact: 2 review passes (no-context, security) ran before the commit, the architecture and with-context passes ran on it and their findings are closed in the follow-up commit; unit, integration and e2e green) | `.specs/CBL-17.2-provider-core.md` | fa73400, follow-up f2f7388 |
 | CBL-17.2 (part 2, increment 6) | 2026-10-17 | done, review closed (money-path `ConnectorService`: `CreateInvoice` with the idempotent replay by order id (unique index, migration 00006) and a conflict on a different request hash, mapping save on an independent budget and retryable `Unavailable` on failure, checkout_url scheme validation; `GetGatewayPayment` rejects unknown adapter states instead of mapping them; `GetCapabilities` serves the loader (empty aggregate no longer touches the cache) and answers `Unavailable` unwired; CBL-003 error mapping incl. caller deadline/cancel and sanitized internals; `ListGatewayPayments` Unimplemented; main registers the server fail-closed; 4 review passes on the staged diff, findings closed in this commit: provider_identity note for adapters recorded in the spec) | `.specs/CBL-17.2-provider-core.md` | this commit |
-| CBL-17.5 | 2026-10-17 | done, review closed (adapter conformance suite: `internal/conformance` testkit with the `CONF-1..CONF-10` checks, data-driven wire mock (route patterns, `{{request.<path>}}` templates, failure injection, request recording), fixture sets for the five profiles mirroring the mock-gateway wire contract (statuses, create/payment/payout/lookup payloads, webhook valid/tampered/missing vectors incl. the token-echo unsigned body); `StrategyFromManifest`/`SignBody`; meta-tests prove the compliant adapter passes and each mutant fails exactly one check; focused internal tests cover the token-echo CONF-6 path; core changes: `domain.ErrGatewayNotFound` with the `NotFound` mapping (also fixes a flaky replay test by a deterministic request expiry), additive manifest fields `verify_encoding`/`verify_prefix` with strategy-gated validation and the BitPay/BTCPay built-ins; 4 review passes on the staged diff, findings closed: CONF-6 missing-signature fixture, template 400 on unresolved placeholders, strengthened CONF-3/5/7/10 assertions, skip recording, documentation alignment; unit coverage total 86.6%, conformance package 80.5%, integration and e2e regression runs green, lint 0) | `.specs/CBL-17.5-conformance-suite.md` | this commit |
+| CBL-17.5 | 2026-10-17 | done, review closed (adapter conformance suite: `internal/conformance` testkit with the `CONF-1..CONF-10` checks, data-driven wire mock (route patterns, `{{request.<path>}}` templates, failure injection, request recording), fixture sets for the five profiles mirroring the mock-gateway wire contract (statuses, create/payment/payout/lookup payloads, webhook valid/tampered/missing vectors incl. the token-echo unsigned body); `StrategyFromManifest`/`SignBody`; meta-tests prove the compliant adapter passes and each mutant fails exactly one check; focused internal tests cover the token-echo CONF-6 path; core changes: `domain.ErrGatewayNotFound` with the `NotFound` mapping (also fixes a flaky replay test by a deterministic request expiry), additive manifest fields `verify_encoding`/`verify_prefix` with strategy-gated validation and the BitPay/BTCPay built-ins; 4 review passes on the staged diff, findings closed: CONF-6 missing-signature fixture, template 400 on unresolved placeholders, strengthened CONF-3/5/7/10 assertions, skip recording, documentation alignment; unit coverage total 86.6%, conformance package 80.5%, integration and e2e regression runs green, lint 0) | `.specs/CBL-17.5-conformance-suite.md` | 197ed10 |
+| CBL-17.9 (increment 1) | 2026-10-17 | done, review closed (BTCPay adapter: `internal/providers/btcpay` implements SPI v1 against Greenfield (hosted invoice create/get with the request-horizon expiry clamp, order lookup tolerant of list/object answers, `BTCPay-Sig` verification via kit raw HMAC, pull payments for payouts/refunds, status/type tables without fabrication); conformance `Run` green for the btcpay fixtures (CONF-1..CONF-10); core additions: `usecase.NewStaticSelector` (interim until 17.17) and `usecase.NewGatewayStatusFetcher` wired into main, capabilities loader fed by the adapter; the compose stand gained the mock-gateway service and `CONNECTOR_BTCPAY_*` and the cross-service scenario E2E_Connector_BTCPayProfile PASSES (create through ConnectorService, canonical reads before/after the mock simulate); the adapter is wrapped by the shared resilience stack (T-CONNECTOR-16) and the manifest carries the fetch mandate; unit coverage total 87.3%, btcpay package 89.1%, integration and e2e regression runs green, lint 0; the local BTCPay regtest stand is increment 2) | `.specs/CBL-17.9-btcpay-adapter.md` | this commit |
 
 ## 11. Runbook
 
@@ -202,3 +221,27 @@ Adapter conformance (17.5):
    strategies (the suite is its first consumer; the defense-in-depth re-check reuses
    it); a provider with a new scheme extends the manifest (encoding, prefix),
    not the core.
+
+BTCPay adapter (17.9):
+
+1. Startup without `CONNECTOR_BTCPAY_BASE_URL`: the adapter is absent by design
+   (`unavailableSelector`, empty gateways); a configured adapter logs
+   `btcpay adapter configured`. A startup error names the missing or invalid env
+   (`btcpay: invalid configuration`, `capabilities env`).
+2. `CreateInvoice` answers provider authentication failures as
+   `FailedPrecondition`/`Unavailable`: check `CONNECTOR_BTCPAY_API_TOKEN`
+   (`Authorization: token`), the store id and the base URL reachability in the
+   logs (`provider status 401`).
+3. `GetGatewayPayment` with an unknown provider status maps to the sanitized
+   `Internal` (`provider returned an unknown state`); the raw status word is
+   visible in the normalizer DLQ context. Extend the adapter tables, never map
+   silently.
+4. Webhook deliveries: the ingress verifies first; the adapter re-verification
+   (`BTCPay-Sig`) is exercised by the conformance suite and adapter tests, and
+   the fetch-to-verify path reads the authoritative status through
+   `GetPayment`. A fetch or status mismatch means the ingress secret and
+   `CONNECTOR_BTCPAY_WEBHOOK_SECRET` differ.
+5. Payouts/refunds are pull payments awaiting approval: `PayoutSubmitted` after
+   creation; the operator approval flow arrives with 17.11/17.12.
+6. Amounts of an asset outside `CONNECTOR_BTCPAY_CAPABILITIES` are rejected
+   (`FailedPrecondition`): add the asset row (catalog 17.21 replaces the env).

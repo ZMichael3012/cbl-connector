@@ -242,6 +242,7 @@ func BuiltinManifests() []ProviderManifest {
 			VerifyStrategy:     VerifyStrategyRawHMAC,
 			VerifyHeader:       "BTCPay-Sig",
 			VerifyPrefix:       "sha256=",
+			FetchMandatory:     true,
 			CapabilitiesSource: CapabilitiesSourceAPI,
 			SecretPath:         "secret/cbl/{env}/btcpay",
 			SecretKeys:         []string{"api_key", "webhook_secret"},

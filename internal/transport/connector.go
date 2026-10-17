@@ -256,6 +256,16 @@ func validateCreateInvoice(ctx context.Context, req *connectorv1.CreateInvoiceRe
 	if req.GetAmount() == nil || req.GetAmount().GetMinorUnits() <= 0 {
 		return status.Error(codes.InvalidArgument, "amount must be positive")
 	}
+	if req.GetAmount().GetDecimals() > money.MaxDecimals {
+		// An unbounded scale reaches money.String() allocation: reject it here
+		// and never build values beyond the platform limit (17.9 review).
+		return status.Error(codes.InvalidArgument, "amount decimals over the limit")
+	}
+	if !strings.EqualFold(strings.TrimSpace(req.GetAmount().GetAsset()), strings.TrimSpace(req.GetAsset())) {
+		// The provider invoice must be created in the routed asset, otherwise
+		// settlement and reconciliation see a different asset than the payment.
+		return status.Error(codes.InvalidArgument, "amount asset must match the request asset")
+	}
 	if req.GetExpiresAt() != nil {
 		expiresAt := req.GetExpiresAt().AsTime()
 		if !expiresAt.After(time.Now()) {

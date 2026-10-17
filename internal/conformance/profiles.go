@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/cbl/cbl-connector/internal/domain"
 )
@@ -146,6 +147,9 @@ func paymentPayloads(statuses []StatusCase, build func(raw string) []byte) map[s
 func nowPaymentsFixtures() ProfileFixtures {
 	const gatewayID = "np-gw-1"
 	secret := []byte("np-secret")
+	// Relative expiry keeps the fixture usable once the NOWPayments adapter
+	// consumes it (the same wall-clock concern as btcpay/bitpay).
+	expiration := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
 	statuses := []StatusCase{
 		{Raw: "waiting", Expected: domain.StateDetected},
 		{Raw: "confirming", Expected: domain.StateDetected},
@@ -165,7 +169,7 @@ func nowPaymentsFixtures() ProfileFixtures {
 		Provider:         "nowpayments",
 		CreatePath:       "POST /v1/invoice",
 		CreateStatus:     201,
-		CreateTemplate:   []byte(`{"id":"np-gw-1","order_id":{{request.order_id}},"price_amount":12.34,"price_currency":"USDT","pay_currency":"usdttrc20","invoice_url":"https://mock-provider.local/nowpayments/checkout/np-gw-1","created_at":"2026-10-17T12:00:00Z","expiration_estimate_date":"2026-10-17T12:15:00Z"}`),
+		CreateTemplate:   []byte(fmt.Sprintf(`{"id":"np-gw-1","order_id":{{request.order_id}},"price_amount":12.34,"price_currency":"USDT","pay_currency":"usdttrc20","invoice_url":"https://mock-provider.local/nowpayments/checkout/np-gw-1","created_at":"2026-10-17T12:00:00Z","expiration_estimate_date":%q}`, expiration)),
 		CreateGatewayID:  gatewayID,
 		OrderField:       "order_id",
 		PaymentPath:      "GET /v1/payment/{gateway_id}",
@@ -235,6 +239,9 @@ func coinGateFixtures() ProfileFixtures {
 func bitPayFixtures() ProfileFixtures {
 	const gatewayID = "bp-gw-1"
 	secret := []byte("bp-secret")
+	// Relative times keep the fixtures usable by wall-clock-sensitive checks.
+	invoiceTime := time.Now().UnixMilli()
+	expirationTime := time.Now().Add(2 * time.Hour).UnixMilli()
 	statuses := []StatusCase{
 		{Raw: "new", Expected: domain.StateDetected},
 		{Raw: "paid", Expected: domain.StateDetected},
@@ -244,14 +251,14 @@ func bitPayFixtures() ProfileFixtures {
 		{Raw: "invalid", Expected: domain.StateFailed},
 	}
 	payment := func(raw string) []byte {
-		return []byte(fmt.Sprintf(`{"id":%q,"url":"https://mock-provider.local/bitpay/checkout/bp-gw-1","status":%q,"price":12340000,"currency":"USDT","orderId":"order-1","amountPaid":12340000,"confirmations":2,"invoiceTime":1792248000000,"expirationTime":1792248900000,"bitcoinAddress":"MOCKADDR"}`, gatewayID, raw))
+		return []byte(fmt.Sprintf(`{"id":%q,"url":"https://mock-provider.local/bitpay/checkout/bp-gw-1","status":%q,"price":12340000,"currency":"USDT","orderId":"order-1","amountPaid":12340000,"confirmations":2,"invoiceTime":%d,"expirationTime":%d,"bitcoinAddress":"MOCKADDR"}`, gatewayID, raw, invoiceTime, expirationTime))
 	}
 	valid := []byte(`{"event":{"code":1003,"name":"invoice_completed"},"data":{"id":"bp-gw-1","orderId":"order-1","status":"complete","price":12340000,"currency":"USDT","amountPaid":12340000,"confirmations":2,"invoiceTime":1792248000000}}`)
 	return ProfileFixtures{
 		Provider:         "bitpay",
 		CreatePath:       "POST /invoices",
 		CreateStatus:     201,
-		CreateTemplate:   []byte(`{"id":"bp-gw-1","url":"https://mock-provider.local/bitpay/checkout/bp-gw-1","status":"new","price":12340000,"currency":"USDT","orderId":{{request.orderId}},"amountPaid":0,"confirmations":0,"invoiceTime":1792248000000,"expirationTime":1792248900000,"bitcoinAddress":"MOCKADDR"}`),
+		CreateTemplate:   []byte(fmt.Sprintf(`{"id":"bp-gw-1","url":"https://mock-provider.local/bitpay/checkout/bp-gw-1","status":"new","price":12340000,"currency":"USDT","orderId":{{request.orderId}},"amountPaid":0,"confirmations":0,"invoiceTime":%d,"expirationTime":%d,"bitcoinAddress":"MOCKADDR"}`, invoiceTime, expirationTime)),
 		CreateGatewayID:  gatewayID,
 		OrderField:       "orderId",
 		PaymentPath:      "GET /invoices/{gateway_id}",
@@ -276,6 +283,10 @@ func bitPayFixtures() ProfileFixtures {
 func btcPayFixtures() ProfileFixtures {
 	const gatewayID = "0123456789abcdef0123456789abcdef"
 	secret := []byte("bt-secret")
+	// Relative times keep the fixtures usable by wall-clock-sensitive checks
+	// (CONF-3 horizon): a static stamp would make the suite expire.
+	created := time.Now().Unix()
+	expiration := time.Now().Add(2 * time.Hour).Unix()
 	statuses := []StatusCase{
 		{Raw: "New", Expected: domain.StateDetected},
 		{Raw: "Processing", Expected: domain.StateDetected},
@@ -284,14 +295,14 @@ func btcPayFixtures() ProfileFixtures {
 		{Raw: "Invalid", Expected: domain.StateFailed},
 	}
 	payment := func(raw string) []byte {
-		return []byte(fmt.Sprintf(`{"id":%q,"storeId":"mock-store","amount":"12.340000","currency":"USDT","status":%q,"checkoutLink":"https://mock-provider.local/btcpay/checkout/0123456789abcdef0123456789abcdef","createdTime":1792248000,"expirationTime":1792248900,"metadata":{"orderId":"order-1","orderNetwork":"trc20"}}`, gatewayID, raw))
+		return []byte(fmt.Sprintf(`{"id":%q,"storeId":"mock-store","amount":"12.340000","currency":"USDT","status":%q,"checkoutLink":"https://mock-provider.local/btcpay/checkout/0123456789abcdef0123456789abcdef","createdTime":%d,"expirationTime":%d,"metadata":{"orderId":"order-1","orderNetwork":"trc20"}}`, gatewayID, raw, created, expiration))
 	}
 	valid := []byte(`{"deliveryId":"01a138fd-0000-7000-8000-0000000000d1","webhookId":"01a138fd-0000-7000-8000-0000000000d2","type":"InvoiceSettled","invoiceId":"0123456789abcdef0123456789abcdef","storeId":"mock-store","metadata":{"orderId":"order-1"}}`)
 	return ProfileFixtures{
 		Provider:         "btcpay",
 		CreatePath:       "POST /api/v1/stores/mock-store/invoices",
 		CreateStatus:     201,
-		CreateTemplate:   []byte(`{"id":"0123456789abcdef0123456789abcdef","storeId":"mock-store","amount":"12.340000","currency":"USDT","status":"New","checkoutLink":"https://mock-provider.local/btcpay/checkout/0123456789abcdef0123456789abcdef","createdTime":1792248000,"expirationTime":1792248900,"metadata":{"orderId":{{request.metadata.orderId}},"orderNetwork":"trc20"}}`),
+		CreateTemplate:   []byte(fmt.Sprintf(`{"id":"0123456789abcdef0123456789abcdef","storeId":"mock-store","amount":"12.340000","currency":"USDT","status":"New","checkoutLink":"https://mock-provider.local/btcpay/checkout/0123456789abcdef0123456789abcdef","createdTime":%d,"expirationTime":%d,"metadata":{"orderId":{{request.metadata.orderId}},"orderNetwork":"trc20"}}`, created, expiration)),
 		CreateGatewayID:  gatewayID,
 		OrderField:       "metadata.orderId",
 		PaymentPath:      "GET /api/v1/stores/mock-store/invoices/{gateway_id}",

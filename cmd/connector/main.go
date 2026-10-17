@@ -4,8 +4,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -28,6 +30,7 @@ import (
 	"github.com/cbl/cbl-kit/grpcmw"
 	"github.com/cbl/cbl-kit/inbox"
 	"github.com/cbl/cbl-kit/inbox/kafkaconsumer"
+	"github.com/cbl/cbl-kit/money"
 	"github.com/cbl/cbl-kit/outbox"
 	"github.com/cbl/cbl-kit/outbox/kafkapub"
 	"github.com/cbl/cbl-kit/storagex"
@@ -35,6 +38,8 @@ import (
 	connectorv1 "github.com/cbl/cbl-protos/gen/go/billing/connector/v1"
 
 	"github.com/cbl/cbl-connector/internal/domain"
+	"github.com/cbl/cbl-connector/internal/gateway"
+	"github.com/cbl/cbl-connector/internal/providers/btcpay"
 	"github.com/cbl/cbl-connector/internal/storage"
 	"github.com/cbl/cbl-connector/internal/transport"
 	"github.com/cbl/cbl-connector/internal/usecase"
@@ -80,6 +85,36 @@ func main() {
 	}
 	log.Info("provider manifests loaded", zap.Int("providers", len(manifestRegistry.IDs())))
 
+	// Provider adapters (17.6 - 17.9): the BTCPay adapter is the first real
+	// provider (dev/CI contour). Without CONNECTOR_BTCPAY_BASE_URL the runtime
+	// stays fail-closed: no gateways, the unavailable selector and no fetcher.
+	gateways := map[string]domain.PaymentGateway{}
+	if base := strings.TrimSpace(os.Getenv("CONNECTOR_BTCPAY_BASE_URL")); base != "" {
+		capabilities, capsErr := capabilitiesFromEnv(os.Getenv("CONNECTOR_BTCPAY_CAPABILITIES"))
+		if capsErr != nil {
+			log.Error("parse CONNECTOR_BTCPAY_CAPABILITIES failed", zap.Error(capsErr))
+			return
+		}
+		adapter, adapterErr := btcpay.New(btcpay.Config{
+			BaseURL:       base,
+			StoreID:       os.Getenv("CONNECTOR_BTCPAY_STORE_ID"),
+			APIToken:      os.Getenv("CONNECTOR_BTCPAY_API_TOKEN"),
+			WebhookSecret: []byte(os.Getenv("CONNECTOR_BTCPAY_WEBHOOK_SECRET")),
+			Capabilities:  capabilities,
+			Timeout:       durationEnv(log, "CONNECTOR_BTCPAY_TIMEOUT", 10*time.Second),
+		})
+		if adapterErr != nil {
+			log.Error("build btcpay adapter failed", zap.Error(adapterErr))
+			return
+		}
+		// Every external call goes through the shared resilience stack (plan
+		// 14.5.3): bulkhead, retries with jitter, breaker and attempt timeouts.
+		// The manifest limiter of the provider is wired when it configures a
+		// rate limit (the BTCPay stand declares none).
+		gateways["btcpay"] = gateway.New(adapter, gateway.ConfigFromEnv(os.Getenv), gateway.WithLogger(log))
+		log.Info("btcpay adapter configured", zap.String("base_url", base))
+	}
+
 	decoders := make([]usecase.WebhookDecoder, 0, 2)
 	for _, provider := range splitCSV(getenv("CONNECTOR_SANDBOX_PROVIDERS", "mock")) {
 		decoder, decodeErr := usecase.NewSandboxDecoder(provider)
@@ -99,16 +134,25 @@ func main() {
 		return
 	}
 	// The provider invoice mapping resolves platform payments of real provider
-	// webhooks (17.2, T-CONNECTOR-03); fetch_required deliveries stay fail
-	// closed until the adapters of 17.6 - 17.9 register a status fetcher.
+	// webhooks (17.2, T-CONNECTOR-03); fetch_required deliveries resolve their
+	// status through the registered adapters (17.9).
 	invoiceMapping := storage.NewProviderInvoicesRepository(db)
-	normalizer := usecase.NewNormalizer(registry, log,
+	normalizerOptions := []usecase.NormalizerOption{
 		usecase.WithPaymentMapping(invoiceMapping),
 		usecase.WithFetchMandatory(func(provider string) bool {
 			manifest, ok := manifestRegistry.Lookup(provider)
 			return ok && manifest.FetchMandatory
 		}),
-	)
+	}
+	if len(gateways) > 0 {
+		fetcher, fetchErr := usecase.NewGatewayStatusFetcher(gateways)
+		if fetchErr != nil {
+			log.Error("build provider status fetcher failed", zap.Error(fetchErr))
+			return
+		}
+		normalizerOptions = append(normalizerOptions, usecase.WithPaymentFetcher(fetcher))
+	}
+	normalizer := usecase.NewNormalizer(registry, log, normalizerOptions...)
 
 	// Routing rules (3.4): PostgreSQL is the source of truth; Redis is only a
 	// cache, and its absence or failure does not affect the selection. The provider
@@ -215,18 +259,32 @@ func main() {
 	grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
 	connectorv1.RegisterConnectorAdminServiceServer(grpcSrv, transport.NewAdminServer(adminRouting, log))
 
-	// The money-path ConnectorService (17.2): the router, adapters and the
-	// capabilities loader of the real providers arrive with 17.6 - 17.9 and the
-	// transport wiring step; until then the calls fail closed with UNAVAILABLE
-	// or NotFound instead of UNIMPLEMENTED, so consumers can integrate today.
-	capabilitiesLoader, err := usecase.NewCapabilitiesLoader(nil, capabilityCache, time.Hour, log)
+	// The money-path ConnectorService (17.2): with a configured adapter the
+	// interim static selector (17.9) routes invoices to it; without adapters
+	// the calls fail closed with UNAVAILABLE or NotFound instead of
+	// UNIMPLEMENTED, so consumers can integrate today.
+	capabilitySources := make([]usecase.CapabilitySource, 0, len(gateways))
+	for _, gateway := range gateways {
+		if source, ok := gateway.(usecase.CapabilitySource); ok {
+			capabilitySources = append(capabilitySources, source)
+		}
+	}
+	capabilitiesLoader, err := usecase.NewCapabilitiesLoader(capabilitySources, capabilityCache, time.Hour, log)
 	if err != nil {
 		log.Error("build capabilities loader failed", zap.Error(err))
 		return
 	}
+	var selector domain.Router = unavailableSelector{}
+	if len(gateways) > 0 {
+		selector, err = usecase.NewStaticSelector(gateways)
+		if err != nil {
+			log.Error("build provider selector failed", zap.Error(err))
+			return
+		}
+	}
 	connectorServer := transport.NewConnectorServer(
-		unavailableSelector{},
-		map[string]domain.PaymentGateway{},
+		selector,
+		gateways,
 		invoiceMapping,
 		capabilitiesLoader,
 		log,
@@ -313,4 +371,90 @@ func splitCSV(raw string) []string {
 		}
 	}
 	return values
+}
+
+// capabilityEnvRow describes one network row of the adapter capabilities env.
+type capabilityEnvRow struct {
+	Network       string `json:"network"`
+	Asset         string `json:"asset"`
+	MinMinor      int64  `json:"min_minor"`
+	MaxMinor      int64  `json:"max_minor"`
+	Decimals      uint32 `json:"decimals"`
+	Confirmations uint32 `json:"confirmations"`
+}
+
+// capabilitiesFromEnv parses the adapter capability rows of the deployment
+// (the catalog artifact 17.21 replaces this configuration later); unknown
+// fields, duplicate networks, missing decimals and inverted bounds fail fast
+// (spec E-7).
+func capabilitiesFromEnv(raw string) (domain.Capabilities, error) {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var rows []capabilityEnvRow
+	if err := decoder.Decode(&rows); err != nil {
+		return domain.Capabilities{}, fmt.Errorf("capabilities env: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return domain.Capabilities{}, errors.New("capabilities env: unexpected trailing json")
+	}
+	if len(rows) == 0 {
+		return domain.Capabilities{}, errors.New("capabilities env: no rows")
+	}
+	networks := make(map[string]domain.NetworkCapability, len(rows))
+	for _, row := range rows {
+		network := strings.TrimSpace(row.Network)
+		asset := strings.ToUpper(strings.TrimSpace(row.Asset))
+		if network == "" || asset == "" {
+			return domain.Capabilities{}, errors.New("capabilities env: network and asset are required")
+		}
+		if row.Decimals == 0 {
+			return domain.Capabilities{}, fmt.Errorf("capabilities env: decimals are required for network %q", network)
+		}
+		if row.MinMinor < 0 || row.MaxMinor < 0 {
+			return domain.Capabilities{}, fmt.Errorf("capabilities env: negative bounds for network %q", network)
+		}
+		if row.MaxMinor != 0 && row.MaxMinor < row.MinMinor {
+			return domain.Capabilities{}, fmt.Errorf("capabilities env: max below min for network %q", network)
+		}
+		if _, duplicate := networks[network]; duplicate {
+			return domain.Capabilities{}, fmt.Errorf("capabilities env: duplicate network %q", network)
+		}
+		minAmount, err := money.New(row.MinMinor, asset, row.Decimals)
+		if err != nil {
+			return domain.Capabilities{}, fmt.Errorf("capabilities env: min amount: %w", err)
+		}
+		maximum := money.Money{Asset: asset, Decimals: row.Decimals}
+		if row.MaxMinor != 0 {
+			maximum, err = money.New(row.MaxMinor, asset, row.Decimals)
+			if err != nil {
+				return domain.Capabilities{}, fmt.Errorf("capabilities env: max amount: %w", err)
+			}
+		}
+		networks[network] = domain.NetworkCapability{
+			Asset:             asset,
+			MinAmount:         minAmount,
+			MaxAmount:         maximum,
+			ConfirmationDepth: row.Confirmations,
+		}
+	}
+	return domain.Capabilities{Networks: networks}, nil
+}
+
+// durationEnv reads a duration from an environment variable; an invalid value
+// falls back to the default with a warning.
+func durationEnv(log *zap.Logger, key string, fallback time.Duration) time.Duration {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		log.Warn("invalid duration env, using default",
+			zap.String("key", key),
+			zap.String("value", raw),
+			zap.Duration("default", fallback),
+		)
+		return fallback
+	}
+	return parsed
 }

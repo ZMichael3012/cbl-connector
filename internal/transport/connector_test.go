@@ -177,6 +177,10 @@ func TestCreateInvoiceValidation(t *testing.T) {
 		"zero amount":       func(r *connectorv1.CreateInvoiceRequest) { r.Amount.MinorUnits = 0 },
 		"empty network":     func(r *connectorv1.CreateInvoiceRequest) { r.Network = "" },
 		"past expiry":       func(r *connectorv1.CreateInvoiceRequest) { r.ExpiresAt = timestamppb.New(time.Now().Add(-time.Minute)) },
+		"decimals over limit": func(r *connectorv1.CreateInvoiceRequest) {
+			r.Amount.Decimals = 99
+		},
+		"asset mismatch": func(r *connectorv1.CreateInvoiceRequest) { r.Amount.Asset = "ETH" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

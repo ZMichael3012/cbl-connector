@@ -70,6 +70,13 @@ func TestBuiltinManifestsAreValid(t *testing.T) {
 	require.Contains(t, seen, "bitpay")
 	require.Contains(t, seen, "btcpay")
 	require.Contains(t, seen, "mock")
+
+	for _, manifest := range manifests {
+		if manifest.ID == "btcpay" {
+			require.True(t, manifest.FetchMandatory,
+				"BTCPay webhooks are always fetch-to-verified (17.9)")
+		}
+	}
 }
 
 func TestBuiltinManifestLimits(t *testing.T) {

@@ -6,8 +6,23 @@ normalization, the administrative routing contour.
 Service role and contracts: `AGENTS.md`. Global platform rules: `../../AGENTS.md`,
 `../../.specs/CBL-000-system-description.md`, `../../.specs/CBL-003-contracts.md`.
 
-E2E: the smoke run follows `test/e2e/E2E.md` (scenario `E2E_Connector_Smoke`,
-including the `ConnectorAdminService` read); artifacts in `test/e2e/.runs/<UTC mark>/`.
+E2E: the smoke run follows `test/e2e/E2E.md` (scenarios `E2E_Connector_Smoke` and
+`E2E_Connector_BTCPayProfile`; artifacts in `test/e2e/.runs/<UTC mark>/`).
+
+## BTCPay adapter (17.9)
+
+```
+CONNECTOR_BTCPAY_BASE_URL=https://btcpay.example          # unset keeps the runtime fail-closed
+CONNECTOR_BTCPAY_STORE_ID=...
+CONNECTOR_BTCPAY_API_TOKEN=...
+CONNECTOR_BTCPAY_WEBHOOK_SECRET=...
+CONNECTOR_BTCPAY_CAPABILITIES=[{"network":"btc","asset":"BTC","min_minor":10000,"decimals":8,"confirmations":2}]
+```
+
+The adapter implements SPI v1 (hosted invoices, order lookup, `BTCPay-Sig` webhook
+verification, pull payments for payouts/refunds) and passes the conformance suite
+(`internal/providers/btcpay/conformance_test.go`). The compose stand points it at the
+mock-gateway `btcpay` profile for the cross-service e2e.
 
 ## Adapter conformance (17.5)
 

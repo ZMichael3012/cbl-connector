@@ -314,6 +314,43 @@ func (r *Resilient) VerifyWebhook(headers map[string][]string, rawBody []byte) (
 	return r.inner.VerifyWebhook(headers, rawBody)
 }
 
+// LookupByOrderID forwards the optional SPI v1 lookup through the same
+// resilience pipeline when the adapter implements it (17.9); without the
+// capability the call is a business rejection, mirroring the pipeline of the
+// limited decorator.
+func (r *Resilient) LookupByOrderID(ctx context.Context, orderID string) (domain.PaymentStatus, error) {
+	inner, ok := r.inner.(domain.LookupGateway)
+	if !ok {
+		return domain.PaymentStatus{}, fmt.Errorf("%w: lookup is not supported", domain.ErrRejected)
+	}
+	return call(r, ctx, "LookupByOrderID", attemptTimeoutPayment, func(attemptCtx context.Context) (domain.PaymentStatus, error) {
+		return inner.LookupByOrderID(attemptCtx, orderID)
+	})
+}
+
+// CreateRefund forwards the optional SPI v1 refund capability through the
+// resilience pipeline; an empty idempotency key fails fast like CreatePayout.
+func (r *Resilient) CreateRefund(ctx context.Context, req domain.RefundRequest) (domain.Refund, error) {
+	if strings.TrimSpace(req.IdempotencyKey) == "" {
+		return domain.Refund{}, fmt.Errorf("%w: CreateRefund: empty idempotency_key", domain.ErrInvalidGatewayRequest)
+	}
+	inner, ok := r.inner.(domain.Refunder)
+	if !ok {
+		return domain.Refund{}, fmt.Errorf("%w: refunds are not supported", domain.ErrRejected)
+	}
+	return call(r, ctx, "CreateRefund", attemptTimeoutPayout, func(attemptCtx context.Context) (domain.Refund, error) {
+		return inner.CreateRefund(attemptCtx, req)
+	})
+}
+
+// Provider forwards the manifest id of the wrapped gateway (capability source port).
+func (r *Resilient) Provider() string {
+	if r.inner == nil {
+		return ""
+	}
+	return r.inner.Capabilities().Provider
+}
+
 // Available reports that the breaker is not open: the provider can receive traffic
 // (the router 3.4 excludes unavailable providers while an alternative exists).
 func (r *Resilient) Available() bool {
@@ -415,8 +452,11 @@ func (r *Resilient) release() {
 
 // isBusinessOutcome reports that the error is a provider business-level response
 // (or a caller bug), not a sign of unavailability: the breaker does not count it.
+// A missing payment (404 of real providers, ErrGatewayNotFound) is a normal
+// read miss and must not open the breaker for all merchants (17.9 closure review).
 func isBusinessOutcome(err error) bool {
 	return errors.Is(err, domain.ErrRejected) ||
+		errors.Is(err, domain.ErrGatewayNotFound) ||
 		errors.Is(err, domain.ErrInvalidRoute) ||
 		errors.Is(err, domain.ErrUnsupportedNetwork) ||
 		errors.Is(err, domain.ErrInvalidGatewayRequest) ||

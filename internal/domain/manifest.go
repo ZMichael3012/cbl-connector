@@ -191,7 +191,8 @@ func (m ProviderManifest) validateSecrets() error {
 // BuiltinManifests returns the manifest catalogue of the evaluated providers
 // (multi-provider decision of 16.10.2026). Limits follow the plan decisions:
 // CoinGate 180/min, NOWPayments 60 rpm (width margin over the official 3 rps),
-// BitPay 30 rpm; BTCPay is our own stand without our-side limits. The mock
+// BitPay 100 invoices/hour sustained (10 burst, 36 s refill; the official
+// merchant limit); BTCPay is our own stand without our-side limits. The mock
 // provider keeps the current sandbox pipeline working until 17.5.
 func BuiltinManifests() []ProviderManifest {
 	return []ProviderManifest{
@@ -233,7 +234,7 @@ func BuiltinManifests() []ProviderManifest {
 			CapabilitiesSource: CapabilitiesSourceAPI,
 			SecretPath:         "secret/cbl/{env}/bitpay",
 			SecretKeys:         []string{"api_token", "private_key_pem"},
-			RateLimit:          RateLimitSpec{RefillInterval: 2 * time.Second, Burst: 30},
+			RateLimit:          RateLimitSpec{RefillInterval: 36 * time.Second, Burst: 10},
 		},
 		{ //nolint:gosec // G101: secret keys are Vault reference names, not credentials
 			Version:            ManifestVersionV1,

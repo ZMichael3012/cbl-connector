@@ -263,15 +263,17 @@ func bitPayFixtures() ProfileFixtures {
 		{Raw: "expired", Expected: domain.StateExpired},
 		{Raw: "invalid", Expected: domain.StateFailed},
 	}
+	// The real API answers decimal major-unit amounts inside the facade
+	// envelope; the fixture mirrors that contract (17.8 correction).
 	payment := func(raw string) []byte {
-		return []byte(fmt.Sprintf(`{"id":%q,"url":"https://mock-provider.local/bitpay/checkout/bp-gw-1","status":%q,"price":12340000,"currency":"USDT","orderId":"order-1","amountPaid":12340000,"confirmations":2,"invoiceTime":%d,"expirationTime":%d,"bitcoinAddress":"MOCKADDR"}`, gatewayID, raw, invoiceTime, expirationTime))
+		return []byte(fmt.Sprintf(`{"facade":"merchant/invoice","data":{"id":%q,"url":"https://mock-provider.local/bitpay/checkout/bp-gw-1","status":%q,"price":12.340000,"currency":"USDT","orderId":"order-1","amountPaid":12.340000,"confirmations":2,"invoiceTime":%d,"expirationTime":%d,"bitcoinAddress":"MOCKADDR"}}`, gatewayID, raw, invoiceTime, expirationTime))
 	}
-	valid := []byte(`{"event":{"code":1003,"name":"invoice_completed"},"data":{"id":"bp-gw-1","orderId":"order-1","status":"complete","price":12340000,"currency":"USDT","amountPaid":12340000,"confirmations":2,"invoiceTime":1792248000000}}`)
+	valid := []byte(`{"event":{"code":1003,"name":"invoice_completed"},"data":{"id":"bp-gw-1","orderId":"order-1","status":"complete","price":12.340000,"currency":"USDT","amountPaid":12.340000,"confirmations":2,"invoiceTime":1792248000000}}`)
 	return ProfileFixtures{
 		Provider:         "bitpay",
 		CreatePath:       "POST /invoices",
 		CreateStatus:     201,
-		CreateTemplate:   []byte(fmt.Sprintf(`{"id":"bp-gw-1","url":"https://mock-provider.local/bitpay/checkout/bp-gw-1","status":"new","price":12340000,"currency":"USDT","orderId":{{request.orderId}},"amountPaid":0,"confirmations":0,"invoiceTime":%d,"expirationTime":%d,"bitcoinAddress":"MOCKADDR"}`, invoiceTime, expirationTime)),
+		CreateTemplate:   []byte(fmt.Sprintf(`{"facade":"merchant/invoice","data":{"id":"bp-gw-1","url":"https://mock-provider.local/bitpay/checkout/bp-gw-1","status":"new","price":12.340000,"currency":"USDT","orderId":{{request.orderId}},"amountPaid":0.000000,"confirmations":0,"invoiceTime":%d,"expirationTime":%d,"bitcoinAddress":"MOCKADDR"}}`, invoiceTime, expirationTime)),
 		CreateGatewayID:  gatewayID,
 		OrderField:       "orderId",
 		PaymentPath:      "GET /invoices/{gateway_id}",

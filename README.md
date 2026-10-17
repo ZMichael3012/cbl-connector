@@ -8,8 +8,27 @@ Service role and contracts: `AGENTS.md`. Global platform rules: `../../AGENTS.md
 
 E2E: the smoke run follows `test/e2e/E2E.md` (scenarios `E2E_Connector_Smoke`,
 `E2E_Connector_BTCPayProfile`, `E2E_Connector_CoinGateProfile`,
-`E2E_Connector_NowPaymentsProfile` and the local BTCPay regtest stand
-`E2E_Connector_BTCPayRegtest`; artifacts in `test/e2e/.runs/<UTC mark>/`).
+`E2E_Connector_NowPaymentsProfile`, `E2E_Connector_BitPayProfile` and the local
+BTCPay regtest stand `E2E_Connector_BTCPayRegtest`; artifacts in
+`test/e2e/.runs/<UTC mark>/`).
+
+## BitPay adapter (17.8)
+
+```
+CONNECTOR_PROVIDERS=bitpay                  # optional CSV allowlist of wired adapters
+CONNECTOR_BITPAY_BASE_URL=https://bitpay.com
+CONNECTOR_BITPAY_API_TOKEN=...              # optional pairing token
+CONNECTOR_BITPAY_PRIVATE_KEY_PEM=<PEM>      # secp256k1 request-signing key (SEC1 or PKCS8)
+CONNECTOR_BITPAY_WEBHOOK_SECRET=...         # raw HMAC-SHA256 in base64 (x-signature)
+CONNECTOR_BITPAY_WEBHOOK_URL=https://...    # optional notificationURL
+CONNECTOR_BITPAY_CAPABILITIES=[{"network":"usdt_trc20","asset":"USDT","min_minor":1000000,"decimals":6,"confirmations":2}]
+```
+
+Invoices create/get, order lookup, raw-HMAC webhook verification and the
+provisional payout/refund shapes (17.11/17.12 own the real flows). Every request
+is ECDSA secp256k1-signed (`X-Identity`/`X-Signature` over url plus body). The
+adapter passes the conformance suite and the compose scenario
+`E2E_Connector_BitPayProfile`.
 
 ## BTCPay adapter (17.9)
 

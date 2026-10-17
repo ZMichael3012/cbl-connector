@@ -3,5 +3,8 @@ bin/
 coverage.out
 cover
 *.log
+# Key material must never land in the repository (BitPay dev PEM, task 17.8).
+*.pem
+*.key
 # E2E run artifacts (convention CBL-002 section 7).
 test/e2e/.runs/

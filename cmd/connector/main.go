@@ -41,6 +41,7 @@ import (
 
 	"github.com/cbl/cbl-connector/internal/domain"
 	"github.com/cbl/cbl-connector/internal/gateway"
+	"github.com/cbl/cbl-connector/internal/providers/bitpay"
 	"github.com/cbl/cbl-connector/internal/providers/btcpay"
 	"github.com/cbl/cbl-connector/internal/providers/coingate"
 	"github.com/cbl/cbl-connector/internal/providers/nowpayments"
@@ -89,8 +90,9 @@ func main() {
 	}
 	log.Info("provider manifests loaded", zap.Int("providers", len(manifestRegistry.IDs())))
 
-	// Provider adapters (17.6 - 17.9): the BTCPay and CoinGate adapters are the
-	// first real providers; CONNECTOR_PROVIDERS optionally restricts the set to
+	// Provider adapters (17.6 - 17.9): every configured provider is built into
+	// the gateways map and wrapped by the shared resilience stack;
+	// CONNECTOR_PROVIDERS optionally restricts the set to
 	// an allowlist (the e2e scenarios select one provider). Without provider
 	// base URLs the runtime stays fail-closed: no gateways, the unavailable
 	// selector and no fetcher.
@@ -113,6 +115,28 @@ func main() {
 	gateways := map[string]domain.PaymentGateway{}
 	// The Redis scripter backs the provider rate limiter when Redis is configured.
 	var redisScripter redis.Scripter
+	if base := strings.TrimSpace(os.Getenv("CONNECTOR_BITPAY_BASE_URL")); base != "" && providerEnabled("bitpay") {
+		capabilities, capsErr := capabilitiesFromEnv(os.Getenv("CONNECTOR_BITPAY_CAPABILITIES"))
+		if capsErr != nil {
+			log.Error("parse CONNECTOR_BITPAY_CAPABILITIES failed", zap.Error(capsErr))
+			return
+		}
+		adapter, adapterErr := bitpay.New(bitpay.Config{
+			BaseURL:       base,
+			APIToken:      os.Getenv("CONNECTOR_BITPAY_API_TOKEN"),
+			PrivateKeyPEM: os.Getenv("CONNECTOR_BITPAY_PRIVATE_KEY_PEM"),
+			WebhookSecret: []byte(os.Getenv("CONNECTOR_BITPAY_WEBHOOK_SECRET")),
+			WebhookURL:    os.Getenv("CONNECTOR_BITPAY_WEBHOOK_URL"),
+			Capabilities:  capabilities,
+			Timeout:       durationEnv(log, "CONNECTOR_BITPAY_TIMEOUT", 10*time.Second),
+		})
+		if adapterErr != nil {
+			log.Error("build bitpay adapter failed", zap.Error(adapterErr))
+			return
+		}
+		gateways["bitpay"] = gateway.New(adapter, gateway.ConfigFromEnv(os.Getenv), gateway.WithLogger(log))
+		log.Info("bitpay adapter configured", zap.String("base_url", base))
+	}
 	if base := strings.TrimSpace(os.Getenv("CONNECTOR_BTCPAY_BASE_URL")); base != "" && providerEnabled("btcpay") {
 		capabilities, capsErr := capabilitiesFromEnv(os.Getenv("CONNECTOR_BTCPAY_CAPABILITIES"))
 		if capsErr != nil {

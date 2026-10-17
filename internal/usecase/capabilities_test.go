@@ -141,6 +141,19 @@ func TestCapabilitiesLoaderNilCacheAndSaveError(t *testing.T) {
 	require.NoError(t, err, "a cache save failure is not fatal")
 }
 
+func TestCapabilitiesLoaderEmptySourcesSkipsCache(t *testing.T) {
+	t.Parallel()
+	cache := &fakeCapCache{}
+	loader, err := usecase.NewCapabilitiesLoader(nil, cache, time.Minute, nil)
+	require.NoError(t, err)
+
+	list, err := loader.List(context.Background(), "")
+	require.NoError(t, err)
+	require.Empty(t, list)
+	require.Zero(t, cache.loadCalls, "an empty aggregate must not read the cache")
+	require.Nil(t, cache.saved, "an empty aggregate must not overwrite the cache")
+}
+
 func TestNewCapabilitiesLoaderValidation(t *testing.T) {
 	t.Parallel()
 	_, err := usecase.NewCapabilitiesLoader(nil, nil, 0, nil)

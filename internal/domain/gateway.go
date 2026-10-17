@@ -98,6 +98,9 @@ type Invoice struct {
 	Provider string
 	// Address sets the payment address.
 	Address string
+	// CheckoutURL sets the hosted payment page of hosted providers (CF-4);
+	// empty means the address flow is used.
+	CheckoutURL string
 	// Network sets the payment network.
 	Network string
 	// Amount sets the expected amount.
@@ -393,6 +396,9 @@ var ErrInvalidProviderInvoice = errors.New("connector: invalid provider invoice 
 // payment: silently remapping the invoice would attribute events to a wrong
 // platform payment.
 var ErrProviderInvoiceConflict = errors.New("connector: provider invoice mapping conflict")
+
+// ErrProviderInvoiceNotFound reports a missing provider invoice mapping.
+var ErrProviderInvoiceNotFound = errors.New("connector: provider invoice mapping not found")
 
 // Validate checks the mapping invariants before it reaches the storage.
 func (m ProviderInvoice) Validate() error {

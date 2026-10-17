@@ -13,8 +13,9 @@ import (
 	"github.com/cbl/cbl-connector/internal/domain"
 )
 
-// ErrProviderInvoiceNotFound reports a missing provider invoice mapping.
-var ErrProviderInvoiceNotFound = errors.New("storage: provider invoice mapping not found")
+// ErrProviderInvoiceNotFound reports a missing provider invoice mapping; the
+// sentinel lives in the domain so the transport port can match it.
+var ErrProviderInvoiceNotFound = domain.ErrProviderInvoiceNotFound
 
 // ProviderInvoicesRepository stores the payment to provider invoice mapping
 // (17.2): webhook normalization and timeout recovery resolve the platform

@@ -84,6 +84,10 @@ func (l *CapabilitiesLoader) List(ctx context.Context, provider string) ([]domai
 		}
 		return nil, fmt.Errorf("%w: %q", domain.ErrProviderNotFound, provider)
 	}
+	if len(l.sources) == 0 {
+		// Nothing to aggregate: an empty answer must not overwrite the cache.
+		return []domain.Capabilities{}, nil
+	}
 	if l.cache != nil {
 		cached, found, err := l.cache.Load(ctx)
 		if err != nil {

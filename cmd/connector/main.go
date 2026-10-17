@@ -115,6 +115,7 @@ func main() {
 	// registry and the Router are wired in task 3.2 (KI-01).
 	ruleStore := storage.NewRouteRulesRepository(db)
 	var ruleCache usecase.RouteConfigCacheStore
+	var capabilityCache usecase.CapabilityCache
 	if redisAddr := os.Getenv("REDIS_ADDR"); redisAddr != "" {
 		redisClient := redis.NewClient(&redis.Options{
 			Addr:                  redisAddr,
@@ -126,6 +127,7 @@ func main() {
 		})
 		defer func() { _ = redisClient.Close() }()
 		ruleCache = storage.NewRouteConfigCache(redisClient)
+		capabilityCache = storage.NewCapabilitiesCache(redisClient)
 	}
 	ruleSource := usecase.NewCachedRouteRules(ruleStore, ruleCache, usecase.RouteCacheTTLFromEnv(os.Getenv), log)
 	if rules, loadErr := ruleSource.Load(ctx); loadErr != nil {
@@ -212,6 +214,24 @@ func main() {
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 	grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
 	connectorv1.RegisterConnectorAdminServiceServer(grpcSrv, transport.NewAdminServer(adminRouting, log))
+
+	// The money-path ConnectorService (17.2): the router, adapters and the
+	// capabilities loader of the real providers arrive with 17.6 - 17.9 and the
+	// transport wiring step; until then the calls fail closed with UNAVAILABLE
+	// or NotFound instead of UNIMPLEMENTED, so consumers can integrate today.
+	capabilitiesLoader, err := usecase.NewCapabilitiesLoader(nil, capabilityCache, time.Hour, log)
+	if err != nil {
+		log.Error("build capabilities loader failed", zap.Error(err))
+		return
+	}
+	connectorServer := transport.NewConnectorServer(
+		unavailableSelector{},
+		map[string]domain.PaymentGateway{},
+		invoiceMapping,
+		capabilitiesLoader,
+		log,
+	)
+	connectorv1.RegisterConnectorServiceServer(grpcSrv, connectorServer)
 	reflection.Register(grpcSrv)
 
 	grpcListener, err := net.Listen("tcp", grpcAddr)
@@ -254,6 +274,15 @@ func main() {
 	}
 	grpcSrv.GracefulStop()
 	log.Info("shutdown finished")
+}
+
+// unavailableSelector fails closed until the router and adapters are wired
+// (17.6 - 17.9): an invoice request never silently falls through.
+type unavailableSelector struct{}
+
+// Select implements transport.GatewaySelector.
+func (unavailableSelector) Select(context.Context, domain.RouteRequest) (domain.PaymentGateway, error) {
+	return nil, domain.ErrProviderUnavailable
 }
 
 // metricsHandler serves a metrics stub until task 0.7.

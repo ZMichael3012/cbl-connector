@@ -8,7 +8,7 @@
 | Wave and parallel group | W5-PROVIDER, stage B |
 | Depends on | CF-4 (`cbl-protos@cf-4`/`cf-4.1`), `cbl-kit` 7900510 (`webhooksig`, `ratelimit`, `money` parsing) |
 | Contract version | consumes `cbl-protos@cf-4.1`, `cbl-kit` 7900510 |
-| Status | in progress: FR-1 - FR-7 delivered and reviewed; the ConnectorService transport, the main wiring (limiters from manifests, capabilities loader, fetcher) and FR-8 remain |
+| Status | in progress: FR-1 - FR-7 delivered (increment 6 committed, review pending), FR-8 partial (the ConnectorService is registered fail-closed; the providers table and the adapter wiring remain) |
 
 ## 1. Context and goal
 
@@ -69,17 +69,35 @@ under `connector:capabilities:v1`, corruption is a read error, so the loader nev
 garbage) with a real-Redis integration test. Remaining: constructing the loader in `main`
 and serving the `GetCapabilities` provider filter once the transport step lands.
 
-FR-7 (part 2, limiter done). Per-provider limiter: `gateway.Limited` decorates any
+FR-7 (part 2, limiter and transport done). Per-provider limiter: `gateway.Limited` decorates any
 `PaymentGateway` with the kit `ratelimit` port (shared Redis bucket, local fallback), keys
 `<provider>:<op>` so the kit prefix yields the CBL-003 `rl:provider:<provider>:<op>` form;
 a denied token returns `ErrProviderOverloaded` without touching the adapter, a limiter
 storage failure fails open (the provider 429 is absorbed by `PauseProvider`, which drains the
-invoice/status/payout buckets with the provider `Retry-After`). Remaining: manifest-limit
-wiring in main and the `ConnectorService` gRPC transport over the Router.
+invoice/status/payout/refund buckets with the provider `Retry-After`). The money-path
+`ConnectorService` transport serves `CreateInvoice` (route, create, mapping save made fatal
+because real webhooks resolve the payment through it), `GetGatewayPayment` (status mapping
+including raw_status) and `GetCapabilities` (the loader with the normalized provider filter);
+the CBL-003 error classification maps to gRPC codes; `ListGatewayPayments` answers
+Unimplemented until the reconciliation task 17.13 defines the export shape. Remaining:
+constructing the real router/gateway map and the limiter wiring per manifest limits with the
+adapters 17.6 - 17.9.
 
-FR-8 (part 2, NOT STARTED). `providers` table and admin visibility (17.15 consumes it);
-payout/refund operations surface through `ConnectorService` once adapters exist
-(17.6 - 17.9, 17.11).
+FR-8 (part 2, partial). The `ConnectorService` is registered and answers fail-closed
+(Unavailable/NotFound) until adapters exist; the `providers` table, admin visibility and
+payout/refund operations surface with 17.15, 17.11 and the adapters 17.6 - 17.9.
+
+Increment 6 review closure (4 passes on the staged diff): the idempotent replay of a retried
+creation replays the stored mapping instead of creating a second provider invoice (unique
+`(provider, order_id)` index in migration 00006; a different request hash is
+`AlreadyExists`); the mapping save runs on an independent budget and a failure is a retryable
+`Unavailable`, so a lost deadline cannot orphan an invoice without a retry path; caller
+deadlines and cancellations keep `DeadlineExceeded`/`Canceled`; unknown adapter states are
+`Internal`, the CF-4 `PENDING` enum value is no longer fabricated; zero timestamps are not
+sent; `checkout_url` must be http(s); request validation has length and expiry-horizon caps;
+the request hash digests trimmed fields; internals are sanitized in error messages; adapters
+must key gateways by the manifest id (`Capabilities().Provider` is the mapping identity) -
+recorded here for 17.6 - 17.9.
 
 Review closure (4 reviewers, 16.10.2026, covering commits 6f04569 - 6a3555a): findings closed
 in increment 4: occurred_at anchors on the receipt time and fails closed without any event

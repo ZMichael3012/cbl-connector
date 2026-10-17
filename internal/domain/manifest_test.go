@@ -9,6 +9,51 @@ import (
 	"github.com/cbl/cbl-connector/internal/domain"
 )
 
+func TestManifestVerifyFieldGating(t *testing.T) {
+	t.Parallel()
+	base := domain.ProviderManifest{ //nolint:gosec // G101: secret keys are Vault reference names, not credentials
+		Version:            domain.ManifestVersionV1,
+		ID:                 "provider",
+		DisplayName:        "Provider",
+		Operations:         []string{domain.OperationInvoice},
+		VerifyStrategy:     domain.VerifyStrategyRawHMAC,
+		VerifyHeader:       "x-signature",
+		SecretPath:         "secret/cbl/{env}/provider",
+		SecretKeys:         []string{"secret"},
+		CapabilitiesSource: domain.CapabilitiesSourceAPI,
+	}
+	require.NoError(t, base.Validate())
+
+	encoded := base
+	encoded.VerifyEncoding = "base64"
+	require.NoError(t, encoded.Validate(), "raw_hmac accepts an encoding")
+
+	canonical := base
+	canonical.VerifyStrategy = domain.VerifyStrategyCanonicalJSONHMAC
+	canonical.VerifyEncoding = "base64"
+	require.Error(t, canonical.Validate(), "canonical_json_hmac must reject verify_encoding")
+
+	unknown := base
+	unknown.VerifyEncoding = "rot13"
+	require.Error(t, unknown.Validate(), "an unknown encoding must be rejected")
+
+	prefixed := base
+	prefixed.VerifyPrefix = "sha256="
+	require.NoError(t, prefixed.Validate())
+
+	tokenEcho := base
+	tokenEcho.VerifyStrategy = domain.VerifyStrategyTokenEcho
+	tokenEcho.VerifyHeader = ""
+	tokenEcho.VerifyField = "token"
+	tokenEcho.FetchMandatory = true
+	tokenEcho.VerifyPrefix = "sha256="
+	require.Error(t, tokenEcho.Validate(), "token_echo must reject verify_prefix")
+
+	tooLong := base
+	tooLong.VerifyPrefix = "prefix-that-is-far-too-long="
+	require.Error(t, tooLong.Validate(), "an oversized prefix must be rejected")
+}
+
 func TestBuiltinManifestsAreValid(t *testing.T) {
 	t.Parallel()
 	manifests := domain.BuiltinManifests()

@@ -33,4 +33,8 @@ var (
 	ErrRouteRevisionConflict = errors.New("connector: routing revision conflict")
 	// ErrProviderNotFound reports a provider unknown to the registry and the rules.
 	ErrProviderNotFound = errors.New("connector: provider not found")
+	// ErrGatewayNotFound reports a provider payment missing at the provider
+	// (the 404 of real provider APIs); the conformance contract CONF-8 and the
+	// LookupGateway semantics use it.
+	ErrGatewayNotFound = errors.New("connector: gateway payment not found")
 )

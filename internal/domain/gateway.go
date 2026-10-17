@@ -333,7 +333,7 @@ type PaymentGateway interface {
 // second invoice when a create call ends without a response.
 type LookupGateway interface {
 	// LookupByOrderID returns the canonical status of the invoice created for
-	// the order; ErrNotFound means no invoice exists for the order.
+	// the order; ErrGatewayNotFound means no invoice exists for the order.
 	LookupByOrderID(ctx context.Context, orderID string) (PaymentStatus, error)
 }
 

@@ -9,6 +9,28 @@ Service role and contracts: `AGENTS.md`. Global platform rules: `../../AGENTS.md
 E2E: the smoke run follows `test/e2e/E2E.md` (scenario `E2E_Connector_Smoke`,
 including the `ConnectorAdminService` read); artifacts in `test/e2e/.runs/<UTC mark>/`.
 
+## Adapter conformance (17.5)
+
+Every adapter (including future ones) passes the shared contract suite from
+`internal/conformance` before onboarding (plan 14.4/14.5.8):
+
+```go
+func TestConformance(t *testing.T) {
+    conformance.Run(t, conformance.Harness{
+        Provider: "nowpayments",
+        Manifest: manifest,
+        New: func(t *testing.T, baseURL string) domain.PaymentGateway {
+            return adapter.New(baseURL, secrets)
+        },
+    })
+}
+```
+
+The suite drives the adapter against provider wire fixtures through `CONF-1..CONF-10`
+(identity, capabilities, create echo, status mapping, unknown status, webhook
+verification, operations, lookup, idempotent create, error classification) and reports
+every violation with the offending fixture.
+
 ## Admin contour (12.2)
 
 `billing.connector.v1.ConnectorAdminService` on the gRPC port (:9050) serves the

@@ -36,7 +36,14 @@ as one `Resilient` instance per provider.
 Provider manifests (17.2): the versioned schema v1 (`internal/domain/manifest.go`) and the
 `usecase.ManifestRegistry` are the source of truth of known providers; SPI v1 adds the
 optional `LookupGateway` and `Refunder` interfaces, and `provider_invoices` maps platform
-payments to provider invoices.
+payments to provider invoices. The schema is extended additively in 17.5 with
+`verify_encoding`/`verify_prefix` (BitPay base64, BTCPay `sha256=`) so the declared
+verification strategy is data, not code.
+Adapter conformance suite (17.5): `internal/conformance` is the contract testkit every
+adapter (including future ones) must pass; it drives an adapter against provider wire
+fixtures (`Fixtures`) through the `CONF-1..CONF-10` checks (`Run`, `RunChecks`), builds
+verification strategies from manifests (`StrategyFromManifest`, `SignBody`) and proves
+itself with meta-tests (compliant adapter passes, mutants fail exactly one check).
 Libraries: the standard `CBL-002` set (Gin, GORM + pgx driver, franz-go + pkg/sr, go-redis,
 goose, zap). `AutoMigrate` is forbidden, migrations are goose only, forward only.
 
@@ -105,6 +112,7 @@ consumer lag; dashboards after task 0.7.
 | T-CONNECTOR-09 | Concurrent rule `Save` operations are serialized by an advisory lock; the cache staleness window during a Load/Save race is bounded by TTL (≤ 60 s); a half-open provider participates in selection again, excess probes are rejected | replace-all without merging configurations; provider recovery without manual intervention | automatic failover to another provider is not performed; staleness window up to 60 s | failover is a separate task after 3.2; the admin path adds the configuration revision (12.2) |
 | T-CONNECTOR-10 | Admin contour (12.2): the revision lives in `routing_config` (a single row, advisory lock + `FOR UPDATE`); the disabled set is persisted in `disabled_providers` and applied by filtering the rule source (the router is untouched); `ConnectorAdminService` is a separate gRPC service so the money-path `ConnectorService` server interface and its fakes stay source-compatible; the back-office is the only client and enforces RBAC and audit | optimistic concurrency between operators; cache consistency via invalidation on every attempt plus the TTL; the exclusion is visible in `Load` | the admin RPCs have no authN inside the trusted network (mTLS - 0.6) and mutate the money routing: port 9050 must not leave the trusted zone (KI-connector-03) | provider enable is an additive follow-up (KI-connector-09); disabled rows have no retention yet |
 | T-CONNECTOR-11 | Provider manifests are versioned data (schema v1) and the SPI stays a set of small Go interfaces (core port plus optional `LookupGateway`/`Refunder`), added instead of widening `PaymentGateway` | the core and the existing fakes stay source-compatible; adding a provider touches only its adapter package, manifest and mapping (functional extensibility guarantee, plan 14.5) | optional interfaces need type assertions at the use sites; a manifest schema change needs a versioned migration of the catalogue | the manifest validation is centralized in `BuiltinManifests`/`Validate`; a new schema version is introduced with the onboarding kit (17.22) |
+| T-CONNECTOR-12 | The adapter conformance suite is an internal testkit (`internal/conformance`) whose fixtures mirror the mock-gateway profiles instead of importing them; the suite must be passed by every adapter (plan 14.5.8, checklist 14.4) | one contract for all current and future adapters; the meta-tests prove the suite catches violating adapters and the signature/shape tests keep the fixtures self-consistent | the fixture mirror must be maintained by hand across two repositories; the suite tests cannot detect cross-repository drift by themselves | the wire shapes are fixed by the mock spec CBL-17.5 section 3.2; the mock side e2e and the 17.16 sandbox runs against live APIs detect drift |
 
 ## 9. Known issues
 
@@ -137,6 +145,7 @@ consumer lag; dashboards after task 0.7.
 | CBL-17.2 (part 2, increment 4) | 2026-10-16 | done, review closed (retroactive 4x review of increments 1-3; findings closed: occurred_at uses the receipt time and fails closed without any event time, the adapter status PaymentID is reconciled with the invoice mapping (a mismatch goes to the DLQ), `gateway.Limited` forwards `LookupGateway`/`Refunder` with a refund bucket, cached capability snapshots are validated against registered sources, `provider_invoices` rejects a gateway id remapped to another payment (payment and request hash check), manifests of re-verifying providers require Vault secret references, `raw_status` added to the canonical event and status; unit, integration and e2e runs green) | `.specs/CBL-17.2-provider-core.md` | e0b81eb |
 | CBL-17.2 (part 2, increment 5) | 2026-10-17 | done, review closed (fetch mandate enforcement: manifest `FetchMandatory` with the token_echo validation and the CoinGate/BitPay built-ins, normalizer predicate `WithFetchMandatory` wired from the registry, the provider key normalized before every lookup so casing cannot bypass the mandate; process fact: 2 review passes (no-context, security) ran before the commit, the architecture and with-context passes ran on it and their findings are closed in the follow-up commit; unit, integration and e2e green) | `.specs/CBL-17.2-provider-core.md` | fa73400, follow-up f2f7388 |
 | CBL-17.2 (part 2, increment 6) | 2026-10-17 | done, review closed (money-path `ConnectorService`: `CreateInvoice` with the idempotent replay by order id (unique index, migration 00006) and a conflict on a different request hash, mapping save on an independent budget and retryable `Unavailable` on failure, checkout_url scheme validation; `GetGatewayPayment` rejects unknown adapter states instead of mapping them; `GetCapabilities` serves the loader (empty aggregate no longer touches the cache) and answers `Unavailable` unwired; CBL-003 error mapping incl. caller deadline/cancel and sanitized internals; `ListGatewayPayments` Unimplemented; main registers the server fail-closed; 4 review passes on the staged diff, findings closed in this commit: provider_identity note for adapters recorded in the spec) | `.specs/CBL-17.2-provider-core.md` | this commit |
+| CBL-17.5 | 2026-10-17 | done, review closed (adapter conformance suite: `internal/conformance` testkit with the `CONF-1..CONF-10` checks, data-driven wire mock (route patterns, `{{request.<path>}}` templates, failure injection, request recording), fixture sets for the five profiles mirroring the mock-gateway wire contract (statuses, create/payment/payout/lookup payloads, webhook valid/tampered/missing vectors incl. the token-echo unsigned body); `StrategyFromManifest`/`SignBody`; meta-tests prove the compliant adapter passes and each mutant fails exactly one check; focused internal tests cover the token-echo CONF-6 path; core changes: `domain.ErrGatewayNotFound` with the `NotFound` mapping (also fixes a flaky replay test by a deterministic request expiry), additive manifest fields `verify_encoding`/`verify_prefix` with strategy-gated validation and the BitPay/BTCPay built-ins; 4 review passes on the staged diff, findings closed: CONF-6 missing-signature fixture, template 400 on unresolved placeholders, strengthened CONF-3/5/7/10 assertions, skip recording, documentation alignment; unit coverage total 86.6%, conformance package 80.5%, integration and e2e regression runs green, lint 0) | `.specs/CBL-17.5-conformance-suite.md` | this commit |
 
 ## 11. Runbook
 
@@ -179,3 +188,17 @@ Routing (3.4, admin contour 12.2):
    (30 - 60 s worst case via TTL): `SELECT provider, reason, disabled_at FROM
    disabled_providers`; re-enabling needs SQL until the `EnableProvider` RPC
    (KI-connector-09).
+
+Adapter conformance (17.5):
+
+1. Every adapter test package calls `conformance.Run(t, conformance.Harness{...})`; each
+   failed `CONF-*` check names the fixture and the violated property: fix the adapter, not
+   the suite or the fixture.
+2. `CONF-0` is a harness or fixture problem (unknown provider, manifest id mismatch, nil
+   factory); `CONF-4` names the raw status whose mapping diverged; `CONF-6` distinguishes
+   a valid, a tampered and a missing signature; `CONF-10` separates the temporary (503)
+   from the rejected (4xx) class.
+3. `StrategyFromManifest` is the mapping from manifest fields to kit `webhooksig`
+   strategies (the suite is its first consumer; the defense-in-depth re-check reuses
+   it); a provider with a new scheme extends the manifest (encoding, prefix),
+   not the core.

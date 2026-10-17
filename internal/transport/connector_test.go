@@ -124,6 +124,11 @@ func newServer(t *testing.T, gateway *fakeGateway, selector *fakeSelector, mappi
 	)
 }
 
+// testRequestExpiry sets the shared create expiry of the test requests: a fixed
+// value keeps the request hash stable across repeated createRequest calls (the
+// replay test compares hashes; time.Now would differ by nanoseconds).
+var testRequestExpiry = timestamppb.New(time.Now().Add(30 * time.Minute))
+
 func createRequest() *connectorv1.CreateInvoiceRequest {
 	return &connectorv1.CreateInvoiceRequest{
 		IdempotencyKey: "idem-1",
@@ -131,7 +136,7 @@ func createRequest() *connectorv1.CreateInvoiceRequest {
 		Amount:         &commonv1.Money{MinorUnits: 1500000000, Asset: "BTC", Decimals: 8},
 		Asset:          "BTC",
 		Network:        "bitcoin",
-		ExpiresAt:      timestamppb.New(time.Now().Add(30 * time.Minute)),
+		ExpiresAt:      testRequestExpiry,
 	}
 }
 
@@ -321,6 +326,18 @@ func TestGetGatewayPayment(t *testing.T) {
 
 	_, err = server.GetGatewayPayment(context.Background(), &connectorv1.GetGatewayPaymentRequest{Provider: "coingate"})
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
+func TestGatewayNotFoundMapping(t *testing.T) {
+	t.Parallel()
+	gateway := &fakeGateway{statusErr: domain.ErrGatewayNotFound}
+	server := newServer(t, gateway, &fakeSelector{selected: gateway}, &fakeMapping{}, &fakeCaps{})
+
+	_, err := server.GetGatewayPayment(context.Background(), &connectorv1.GetGatewayPaymentRequest{
+		Provider:  "coingate",
+		GatewayId: "missing",
+	})
+	require.Equal(t, codes.NotFound, status.Code(err), "a missing provider payment must map to NotFound")
 }
 
 func TestGetCapabilities(t *testing.T) {

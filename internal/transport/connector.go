@@ -372,7 +372,7 @@ func statusFromError(err error) error {
 	case errors.Is(err, domain.ErrUnsupportedNetwork), errors.Is(err, domain.ErrInvalidRoute),
 		errors.Is(err, domain.ErrInvalidGatewayRequest), errors.Is(err, domain.ErrInvalidProviderInvoice):
 		return status.Error(codes.InvalidArgument, err.Error())
-	case errors.Is(err, domain.ErrUnknownProvider), errors.Is(err, domain.ErrProviderNotFound):
+	case errors.Is(err, domain.ErrUnknownProvider), errors.Is(err, domain.ErrProviderNotFound), errors.Is(err, domain.ErrGatewayNotFound):
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, domain.ErrProviderInvoiceConflict):
 		return status.Error(codes.AlreadyExists, err.Error())

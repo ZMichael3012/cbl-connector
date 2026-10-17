@@ -27,6 +27,9 @@ const (
 // limiter limit.
 const maxManifestBurst = 1_000_000
 
+// maxVerifyPrefixLen bounds the raw_hmac digest prefix ("sha256=" of BTCPay).
+const maxVerifyPrefixLen = 16
+
 // ErrInvalidManifest reports an invalid provider manifest.
 var ErrInvalidManifest = errors.New("connector: invalid provider manifest")
 
@@ -56,6 +59,10 @@ type ProviderManifest struct {
 	VerifyStrategy string `json:"verify_strategy"`
 	// VerifyHeader sets the signature header of raw_hmac/canonical_json_hmac.
 	VerifyHeader string `json:"verify_header"`
+	// VerifyEncoding sets the raw_hmac digest encoding: hex (default) or base64.
+	VerifyEncoding string `json:"verify_encoding"`
+	// VerifyPrefix sets an optional raw_hmac digest prefix, for example "sha256=".
+	VerifyPrefix string `json:"verify_prefix"`
 	// VerifyField sets the token echo body field of token_echo.
 	VerifyField string `json:"verify_field"`
 	// CapabilitiesSource selects where capabilities come from: the provider API
@@ -126,6 +133,23 @@ func (m ProviderManifest) Validate() error {
 		// The ingress signature_state stays the only verification (mock raws).
 	default:
 		return fmt.Errorf("%w: provider %q has unknown verify_strategy %q", ErrInvalidManifest, m.ID, m.VerifyStrategy)
+	}
+	switch m.VerifyEncoding {
+	case "":
+	case "hex", "base64":
+		if m.VerifyStrategy != VerifyStrategyRawHMAC {
+			return fmt.Errorf("%w: provider %q: verify_encoding requires raw_hmac", ErrInvalidManifest, m.ID)
+		}
+	default:
+		return fmt.Errorf("%w: provider %q has unknown verify_encoding %q", ErrInvalidManifest, m.ID, m.VerifyEncoding)
+	}
+	if m.VerifyPrefix != "" {
+		if m.VerifyStrategy != VerifyStrategyRawHMAC {
+			return fmt.Errorf("%w: provider %q: verify_prefix requires raw_hmac", ErrInvalidManifest, m.ID)
+		}
+		if len(m.VerifyPrefix) > maxVerifyPrefixLen {
+			return fmt.Errorf("%w: provider %q: verify_prefix is too long", ErrInvalidManifest, m.ID)
+		}
 	}
 	switch m.CapabilitiesSource {
 	case CapabilitiesSourceAPI, CapabilitiesSourceStatic:
@@ -203,6 +227,7 @@ func BuiltinManifests() []ProviderManifest {
 			Operations:         []string{OperationInvoice, OperationPayout, OperationRefund},
 			VerifyStrategy:     VerifyStrategyRawHMAC,
 			VerifyHeader:       "x-signature",
+			VerifyEncoding:     "base64",
 			FetchMandatory:     true,
 			CapabilitiesSource: CapabilitiesSourceAPI,
 			SecretPath:         "secret/cbl/{env}/bitpay",
@@ -216,6 +241,7 @@ func BuiltinManifests() []ProviderManifest {
 			Operations:         []string{OperationInvoice, OperationPayout, OperationRefund},
 			VerifyStrategy:     VerifyStrategyRawHMAC,
 			VerifyHeader:       "BTCPay-Sig",
+			VerifyPrefix:       "sha256=",
 			CapabilitiesSource: CapabilitiesSourceAPI,
 			SecretPath:         "secret/cbl/{env}/btcpay",
 			SecretKeys:         []string{"api_key", "webhook_secret"},

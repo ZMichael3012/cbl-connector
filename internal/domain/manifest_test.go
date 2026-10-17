@@ -76,6 +76,10 @@ func TestBuiltinManifestsAreValid(t *testing.T) {
 			require.True(t, manifest.FetchMandatory,
 				"BTCPay webhooks are always fetch-to-verified (17.9)")
 		}
+		if manifest.ID == "nowpayments" {
+			require.True(t, manifest.FetchMandatory,
+				"NOWPayments webhooks are always fetch-to-verified (17.6)")
+		}
 	}
 }
 

@@ -43,6 +43,11 @@ type ProfileFixtures struct {
 	CreateGatewayID string
 	// OrderField sets the dotted path of the order reference in the create request.
 	OrderField string
+	// CheckNetwork sets the network used by the CONF checks for this provider
+	// (empty means the shared default "usdt_trc20"); providers with their own
+	// network codes (NOWPayments "usdttrc20") set it so the adapter network
+	// validation matches the configured capability row.
+	CheckNetwork string
 	// PaymentPath sets the "METHOD /path" of the payment route ("{gateway_id}" wildcard).
 	PaymentPath string
 	// PaymentGatewayID sets the invoice id embedded in the payment payloads.
@@ -179,6 +184,7 @@ func nowPaymentsFixtures() ProfileFixtures {
 		CreateTemplate:   []byte(fmt.Sprintf(`{"id":"np-gw-1","order_id":{{request.order_id}},"price_amount":12.34,"price_currency":"USDT","pay_currency":"usdttrc20","invoice_url":"https://mock-provider.local/nowpayments/checkout/np-gw-1","created_at":"2026-10-17T12:00:00Z","expiration_estimate_date":%q}`, expiration)),
 		CreateGatewayID:  gatewayID,
 		OrderField:       "order_id",
+		CheckNetwork:     "usdttrc20",
 		PaymentPath:      "GET /v1/payment/{gateway_id}",
 		PaymentGatewayID: gatewayID,
 		PaymentByStatus:  paymentPayloads(statuses, payment),

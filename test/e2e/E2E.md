@@ -22,6 +22,7 @@ scenario with poison-pill cases runs separately on testcontainers (`make test-e2
 | `E2E_Connector_BTCPayProfile` | compose stand with the mock-gateway `btcpay` profile: `ConnectorService/CreateInvoice` answers a 32-hex invoice id, provider `btcpay` and a checkout link; `GetGatewayPayment` answers the detected state with raw `New`; after `POST /api/v1/simulate provider=btcpay status=confirmed` on the mock the read answers the confirmed state with raw `Settled` | the BTCPay adapter against the CBL-17.5 profile wire contract (cross-service) |
 | `E2E_Connector_BTCPayRegtest` | local BTCPay regtest stand: programmatic setup (admin, API key, store, webhook, watch-only wallet), regtest funding; an invoice created through `ConnectorService` is paid from the node, `GetGatewayPayment` settles to `CONFIRMED`/`Settled`; the provider order lookup finds the invoice; deliveries succeed and `BTCPay-Sig` verifies offline over the raw delivery body; the refund wire shape (pull payment with string method ids plus a payout `AwaitingApproval`) is accepted | the BTCPay adapter against the real Greenfield API (BTCPay Server 2.0.6) |
 | `E2E_Connector_CoinGateProfile` | compose stand with the mock-gateway `coingate` profile selected through `CONNECTOR_PROVIDERS=coingate`: `CreateInvoice` answers a numeric order id, provider `coingate` and a payment address; `GetGatewayPayment` answers detected/`new`; the mock simulate advances the order; the read answers confirmed/`paid` | the CoinGate adapter against the CBL-17.5 profile wire contract (cross-service) |
+| `E2E_Connector_NowPaymentsProfile` | compose stand with the mock-gateway `nowpayments` profile selected: `CreateInvoice` answers the invoice id, provider `nowpayments` and a checkout URL; the read answers detected/`waiting`; the mock simulate advances; the read answers confirmed/`finished` | the NOWPayments adapter against the CBL-17.5 profile wire contract (cross-service) |
 
 ## 2. Isolation and parallelism
 
@@ -112,7 +113,28 @@ scenario with poison-pill cases runs separately on testcontainers (`make test-e2
 5. Read again: the canonical confirmed state (`CONFIRMED`) with `rawStatus` = `paid`.
 6. Checks go to `smoke-checks.txt`.
 
-## 7. E2E_Connector_BTCPayRegtest
+## 7. E2E_Connector_NowPaymentsProfile
+
+1. Common run order, steps 1-4; start the connector with the NOWPayments
+   provider selected: `CONNECTOR_PROVIDERS=nowpayments`,
+   `CONNECTOR_NOWPAYMENTS_BASE_URL=http://mock-gateway:8120`,
+   `CONNECTOR_NOWPAYMENTS_API_KEY=mock-token`,
+   `CONNECTOR_NOWPAYMENTS_IPN_SECRET=mock-nowpayments-secret`,
+   `CONNECTOR_NOWPAYMENTS_CAPABILITIES=[{"network":"usdttrc20","asset":"USDT","min_minor":1000000,"decimals":6,"confirmations":2}]`.
+2. Create an invoice through the money path:
+   `{"payment_id":"<fresh UUID>","idempotency_key":"nowpayments-e2e-1","amount":{"minor_units":12340000,"asset":"USDT","decimals":6},"asset":"USDT","network":"usdttrc20","expires_at":"<now+30m RFC3339>"}`;
+   the answer must carry the mock invoice id, `provider` = `nowpayments` and a
+   non-empty `checkoutUrl`.
+3. Read back: `GetGatewayPayment` with
+   `{"provider":"nowpayments","gatewayId":"<id>"}` must answer the canonical
+   detected state (`DETECTED`) and `rawStatus` = `waiting`.
+4. Advance the mock order: `POST http://localhost:8120/api/v1/simulate` with
+   `{"gateway_id":"<id>","provider":"nowpayments","status":"confirmed"}`.
+5. Read again: the canonical confirmed state (`CONFIRMED`) with
+   `rawStatus` = `finished`.
+6. Checks go to `smoke-checks.txt`.
+
+## 8. E2E_Connector_BTCPayRegtest
 
 Stand: `test/e2e/btcpay-stand/docker-compose.yml` (bitcoind regtest, NBXplorer
 2.5.14, BTCPay Server 2.0.6, postgres, the sink logger, the connector built from
@@ -153,10 +175,10 @@ the refund wire shapes.
    (`payoutMethods:["BTC"]`) and a payout against it (`payoutMethodId`
    `BTC-CHAIN`); the payout answers `AwaitingApproval` (the approval flow is
    17.11).
-9. Artifacts as in section 8 plus the setup and webhook transcripts; stop the
+9. Artifacts as in section 9 plus the setup and webhook transcripts; stop the
    stand with `down -v`.
 
-## 8. Mandatory run artifacts
+## 9. Mandatory run artifacts
 
 - `summary.md` (template `.additionals/summary.template.md`; PASS/FAIL verdict, steps,
   key values, artifact list, time);
@@ -165,12 +187,12 @@ the refund wire shapes.
 - `smoke.log` (curl transcripts) and `smoke-checks.txt`;
 - on failure: container states and the connector log fragments around the failure.
 
-## 9. Auxiliary files (.additionals)
+## 10. Auxiliary files (.additionals)
 
 - `summary.template.md` - the `summary.md` template;
 - `inventory.md` - the list of auxiliary files and their purpose.
 
-## 10. Cleanup
+## 11. Cleanup
 
 `docker compose -p cbl-connector-e2e-<MARK> -f deploy/docker-compose.yml --profile app down -v`
 at the end; `.runs/` is not committed; a repeated run must start from a clean stand.

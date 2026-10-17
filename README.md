@@ -7,9 +7,9 @@ Service role and contracts: `AGENTS.md`. Global platform rules: `../../AGENTS.md
 `../../.specs/CBL-000-system-description.md`, `../../.specs/CBL-003-contracts.md`.
 
 E2E: the smoke run follows `test/e2e/E2E.md` (scenarios `E2E_Connector_Smoke`,
-`E2E_Connector_BTCPayProfile`, `E2E_Connector_CoinGateProfile` and the local
-BTCPay regtest stand `E2E_Connector_BTCPayRegtest`; artifacts in
-`test/e2e/.runs/<UTC mark>/`).
+`E2E_Connector_BTCPayProfile`, `E2E_Connector_CoinGateProfile`,
+`E2E_Connector_NowPaymentsProfile` and the local BTCPay regtest stand
+`E2E_Connector_BTCPayRegtest`; artifacts in `test/e2e/.runs/<UTC mark>/`).
 
 ## BTCPay adapter (17.9)
 
@@ -25,6 +25,21 @@ The adapter implements SPI v1 (hosted invoices, order lookup, `BTCPay-Sig` webho
 verification, pull payments for payouts/refunds) and passes the conformance suite
 (`internal/providers/btcpay/conformance_test.go`). The compose stand points it at the
 mock-gateway `btcpay` profile for the cross-service e2e.
+
+## NOWPayments adapter (17.6)
+
+```
+CONNECTOR_PROVIDERS=nowpayments             # optional CSV allowlist of wired adapters
+CONNECTOR_NOWPAYMENTS_BASE_URL=https://api.nowpayments.io
+CONNECTOR_NOWPAYMENTS_API_KEY=...
+CONNECTOR_NOWPAYMENTS_IPN_SECRET=...        # canonical JSON HMAC-SHA512 (x-nowpayments-sig)
+CONNECTOR_NOWPAYMENTS_CAPABILITIES=[{"network":"usdttrc20","asset":"USDT","min_minor":1000000,"decimals":6,"confirmations":2}]
+```
+
+Hosted invoices, payment reads and the envelope lookup, IPN verification and the
+provisional payout shapes (17.11). Refunds are manual (decision 8). The adapter
+passes the conformance suite and the compose scenario
+`E2E_Connector_NowPaymentsProfile`.
 
 ## CoinGate adapter (17.7)
 

@@ -34,6 +34,7 @@ import (
 	"github.com/cbl/cbl-kit/money"
 	"github.com/cbl/cbl-kit/outbox"
 	"github.com/cbl/cbl-kit/outbox/kafkapub"
+	"github.com/cbl/cbl-kit/ratelimit"
 	"github.com/cbl/cbl-kit/storagex"
 
 	connectorv1 "github.com/cbl/cbl-protos/gen/go/billing/connector/v1"
@@ -42,6 +43,7 @@ import (
 	"github.com/cbl/cbl-connector/internal/gateway"
 	"github.com/cbl/cbl-connector/internal/providers/btcpay"
 	"github.com/cbl/cbl-connector/internal/providers/coingate"
+	"github.com/cbl/cbl-connector/internal/providers/nowpayments"
 	"github.com/cbl/cbl-connector/internal/storage"
 	"github.com/cbl/cbl-connector/internal/transport"
 	"github.com/cbl/cbl-connector/internal/usecase"
@@ -109,6 +111,8 @@ func main() {
 		return slices.Contains(providerAllow, id)
 	}
 	gateways := map[string]domain.PaymentGateway{}
+	// The Redis scripter backs the provider rate limiter when Redis is configured.
+	var redisScripter redis.Scripter
 	if base := strings.TrimSpace(os.Getenv("CONNECTOR_BTCPAY_BASE_URL")); base != "" && providerEnabled("btcpay") {
 		capabilities, capsErr := capabilitiesFromEnv(os.Getenv("CONNECTOR_BTCPAY_CAPABILITIES"))
 		if capsErr != nil {
@@ -154,6 +158,26 @@ func main() {
 		gateways["coingate"] = gateway.New(adapter, gateway.ConfigFromEnv(os.Getenv), gateway.WithLogger(log))
 		log.Info("coingate adapter configured", zap.String("base_url", base))
 	}
+	if base := strings.TrimSpace(os.Getenv("CONNECTOR_NOWPAYMENTS_BASE_URL")); base != "" && providerEnabled("nowpayments") {
+		capabilities, capsErr := capabilitiesFromEnv(os.Getenv("CONNECTOR_NOWPAYMENTS_CAPABILITIES"))
+		if capsErr != nil {
+			log.Error("parse CONNECTOR_NOWPAYMENTS_CAPABILITIES failed", zap.Error(capsErr))
+			return
+		}
+		adapter, adapterErr := nowpayments.New(nowpayments.Config{
+			BaseURL:      base,
+			APIKey:       os.Getenv("CONNECTOR_NOWPAYMENTS_API_KEY"),
+			IPNSecret:    []byte(os.Getenv("CONNECTOR_NOWPAYMENTS_IPN_SECRET")),
+			Capabilities: capabilities,
+			Timeout:      durationEnv(log, "CONNECTOR_NOWPAYMENTS_TIMEOUT", 10*time.Second),
+		})
+		if adapterErr != nil {
+			log.Error("build nowpayments adapter failed", zap.Error(adapterErr))
+			return
+		}
+		gateways["nowpayments"] = gateway.New(adapter, gateway.ConfigFromEnv(os.Getenv), gateway.WithLogger(log))
+		log.Info("nowpayments adapter configured", zap.String("base_url", base))
+	}
 
 	decoders := make([]usecase.WebhookDecoder, 0, 2)
 	for _, provider := range splitCSV(getenv("CONNECTOR_SANDBOX_PROVIDERS", "mock")) {
@@ -184,15 +208,6 @@ func main() {
 			return ok && manifest.FetchMandatory
 		}),
 	}
-	if len(gateways) > 0 {
-		fetcher, fetchErr := usecase.NewGatewayStatusFetcher(gateways)
-		if fetchErr != nil {
-			log.Error("build provider status fetcher failed", zap.Error(fetchErr))
-			return
-		}
-		normalizerOptions = append(normalizerOptions, usecase.WithPaymentFetcher(fetcher))
-	}
-	normalizer := usecase.NewNormalizer(registry, log, normalizerOptions...)
 
 	// Routing rules (3.4): PostgreSQL is the source of truth; Redis is only a
 	// cache, and its absence or failure does not affect the selection. The provider
@@ -210,9 +225,54 @@ func main() {
 			ContextTimeoutEnabled: true,
 		})
 		defer func() { _ = redisClient.Close() }()
+		redisScripter = redisClient
 		ruleCache = storage.NewRouteConfigCache(redisClient)
 		capabilityCache = storage.NewCapabilitiesCache(redisClient)
 	}
+	// The manifest rate limiter (17.2 FR-7, T-CONNECTOR-16): providers with a
+	// configured bucket are wrapped by gateway.Limited (the Redis bucket when
+	// available, the local one otherwise); BTCPay declares none.
+	for provider, registered := range gateways {
+		manifest, ok := manifestRegistry.Lookup(provider)
+		if !ok || manifest.RateLimit.Burst <= 0 {
+			continue
+		}
+		limitConfig := ratelimit.Config{Burst: manifest.RateLimit.Burst, RefillInterval: manifest.RateLimit.RefillInterval}
+		local, localErr := ratelimit.NewLocal(limitConfig)
+		if localErr != nil {
+			log.Error("build provider limiter failed", zap.String("provider", provider), zap.Error(localErr))
+			return
+		}
+		var limiter gateway.Limiter = local
+		if redisScripter != nil {
+			redisLimiter, redisErr := ratelimit.NewRedis(redisScripter, limitConfig)
+			if redisErr != nil {
+				log.Error("build redis provider limiter failed", zap.String("provider", provider), zap.Error(redisErr))
+				return
+			}
+			limiter = redisLimiter
+		}
+		limited, limitedErr := gateway.NewLimited(registered, limiter, provider)
+		if limitedErr != nil {
+			log.Error("wrap provider limiter failed", zap.String("provider", provider), zap.Error(limitedErr))
+			return
+		}
+		gateways[provider] = limited
+		log.Info("provider rate limiter wired", zap.String("provider", provider), zap.Int("burst", manifest.RateLimit.Burst))
+	}
+
+	// The fetcher and the normalizer are built after the wrappers so the
+	// fetch-to-verify path passes the resilience and limiter stack too.
+	if len(gateways) > 0 {
+		fetcher, fetchErr := usecase.NewGatewayStatusFetcher(gateways)
+		if fetchErr != nil {
+			log.Error("build provider status fetcher failed", zap.Error(fetchErr))
+			return
+		}
+		normalizerOptions = append(normalizerOptions, usecase.WithPaymentFetcher(fetcher))
+	}
+	normalizer := usecase.NewNormalizer(registry, log, normalizerOptions...)
+
 	ruleSource := usecase.NewCachedRouteRules(ruleStore, ruleCache, usecase.RouteCacheTTLFromEnv(os.Getenv), log)
 	if rules, loadErr := ruleSource.Load(ctx); loadErr != nil {
 		log.Warn("routing rules load failed", zap.Error(loadErr))

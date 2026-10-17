@@ -127,6 +127,14 @@ func (l *Limited) Capabilities() domain.Capabilities {
 	return l.next.Capabilities()
 }
 
+// Provider forwards the manifest id of the wrapped gateway (capability source port).
+func (l *Limited) Provider() string {
+	if l.next == nil {
+		return ""
+	}
+	return l.next.Capabilities().Provider
+}
+
 // PauseProvider empties every operation bucket of the provider for d: adapters
 // call it with the provider Retry-After after a 429/503 answer.
 func (l *Limited) PauseProvider(ctx context.Context, d time.Duration) error {

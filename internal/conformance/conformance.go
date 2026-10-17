@@ -404,13 +404,18 @@ func checkErrorClassification(adapter domain.PaymentGateway, wire *Wire, fixture
 	return nil
 }
 
-// CreateInvoiceRequest builds the fixture create request of a check.
+// CreateInvoiceRequest builds the fixture create request of a check; the
+// network comes from the fixtures (the shared default otherwise).
 func (f ProfileFixtures) CreateInvoiceRequest(suffix string) domain.CreateInvoiceRequest {
+	network := f.CheckNetwork
+	if network == "" {
+		network = "usdt_trc20"
+	}
 	return domain.CreateInvoiceRequest{
 		IdempotencyKey: "conf-" + suffix,
 		PaymentID:      "order-" + suffix,
 		Amount:         money.MustParse("12.34", "USDT", 6),
-		Network:        "usdt_trc20",
+		Network:        network,
 		ExpiresAt:      time.Now().UTC().Add(15 * time.Minute),
 	}
 }

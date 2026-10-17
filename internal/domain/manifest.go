@@ -215,6 +215,7 @@ func BuiltinManifests() []ProviderManifest {
 			Operations:         []string{OperationInvoice, OperationPayout},
 			VerifyStrategy:     VerifyStrategyCanonicalJSONHMAC,
 			VerifyHeader:       "x-nowpayments-sig",
+			FetchMandatory:     true,
 			CapabilitiesSource: CapabilitiesSourceAPI,
 			SecretPath:         "secret/cbl/{env}/nowpayments",
 			SecretKeys:         []string{"api_key", "ipn_secret", "jwt_password", "totp_secret"},

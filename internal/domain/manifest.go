@@ -61,6 +61,10 @@ type ProviderManifest struct {
 	// CapabilitiesSource selects where capabilities come from: the provider API
 	// (with a static fallback) or a static configuration only.
 	CapabilitiesSource string `json:"capabilities_source"`
+	// FetchMandatory forces the fetch-to-verify status re-check for every
+	// delivery of the provider, regardless of the raw fetch_required flag
+	// (CoinGate and BitPay status models, CBL-003 section 4).
+	FetchMandatory bool `json:"fetch_mandatory"`
 	// SecretPath sets the Vault path template; {env} is replaced by the stand.
 	SecretPath string `json:"secret_path"`
 	// SecretKeys lists the Vault keys under SecretPath.
@@ -111,6 +115,12 @@ func (m ProviderManifest) Validate() error {
 		}
 		if err := m.validateSecrets(); err != nil {
 			return err
+		}
+		if !m.FetchMandatory {
+			// The CoinGate status model always needs the provider fetch; a
+			// manifest that omits the mandate would ship raws the core cannot
+			// trust (mirror of the ingress rule).
+			return fmt.Errorf("%w: provider %q: token_echo requires fetch_mandatory", ErrInvalidManifest, m.ID)
 		}
 	case VerifyStrategyNone:
 		// The ingress signature_state stays the only verification (mock raws).
@@ -168,6 +178,7 @@ func BuiltinManifests() []ProviderManifest {
 			Operations:         []string{OperationInvoice, OperationPayout, OperationRefund},
 			VerifyStrategy:     VerifyStrategyTokenEcho,
 			VerifyField:        "token",
+			FetchMandatory:     true,
 			CapabilitiesSource: CapabilitiesSourceAPI,
 			SecretPath:         "secret/cbl/{env}/coingate",
 			SecretKeys:         []string{"api_token", "ipn_token"},
@@ -192,6 +203,7 @@ func BuiltinManifests() []ProviderManifest {
 			Operations:         []string{OperationInvoice, OperationPayout, OperationRefund},
 			VerifyStrategy:     VerifyStrategyRawHMAC,
 			VerifyHeader:       "x-signature",
+			FetchMandatory:     true,
 			CapabilitiesSource: CapabilitiesSourceAPI,
 			SecretPath:         "secret/cbl/{env}/bitpay",
 			SecretKeys:         []string{"api_token", "private_key_pem"},

@@ -8,8 +8,10 @@ import (
 
 	eventsv1 "github.com/cbl/cbl-protos/gen/go/billing/events/v1"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/cbl/cbl-kit/inbox"
 	"github.com/cbl/cbl-kit/money"
 
 	"github.com/cbl/cbl-connector/internal/domain"
@@ -42,6 +44,41 @@ type fakeFetcher struct {
 func (f *fakeFetcher) FetchPaymentStatus(_ context.Context, _, _ string) (domain.PaymentStatus, error) {
 	f.calls++
 	return f.status, f.err
+}
+
+func TestHandleMandatoryFetchFailsClosed(t *testing.T) {
+	t.Parallel()
+	registry, err := NewDecoderRegistry(&fakeDecoder{})
+	require.NoError(t, err)
+	normalizer := NewNormalizer(registry, nil, WithFetchMandatory(func(provider string) bool {
+		return provider == "coingate"
+	}))
+
+	// The mandate routes the delivery to the fetch path even without the raw
+	// flag; without a fetcher it fails closed before any storage access.
+	// A differently-cased provider must not slip past the mandate lookup.
+	payload, err := proto.Marshal(&eventsv1.GatewayWebhookRaw{
+		Provider:       "CoinGate",
+		GatewayId:      "order-1",
+		SignatureState: eventsv1.WebhookSignatureState_WEBHOOK_SIGNATURE_STATE_VERIFIED,
+	})
+	require.NoError(t, err)
+	err = normalizer.Handle(context.Background(), nil, inbox.Message{Value: payload})
+	require.ErrorIs(t, err, domain.ErrProviderUnavailable)
+}
+
+func TestFetchMandatoryFor(t *testing.T) {
+	t.Parallel()
+	withoutPredicate := newFetchNormalizer(t, nil, nil)
+	require.False(t, withoutPredicate.fetchMandatoryFor("coingate"))
+
+	registry, err := NewDecoderRegistry(&fakeDecoder{})
+	require.NoError(t, err)
+	withPredicate := NewNormalizer(registry, nil, WithFetchMandatory(func(provider string) bool {
+		return provider == "coingate"
+	}))
+	require.True(t, withPredicate.fetchMandatoryFor("coingate"))
+	require.False(t, withPredicate.fetchMandatoryFor("btcpay"))
 }
 
 func TestVerificationState(t *testing.T) {

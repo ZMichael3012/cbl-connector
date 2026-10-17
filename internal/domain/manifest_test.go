@@ -35,6 +35,7 @@ func TestBuiltinManifestLimits(t *testing.T) {
 	}
 	coingate := byID["coingate"]
 	require.Equal(t, domain.VerifyStrategyTokenEcho, coingate.VerifyStrategy)
+	require.True(t, coingate.FetchMandatory, "the CoinGate status model always needs the fetch")
 	require.Positive(t, coingate.RateLimit.Burst)
 	require.Less(t, coingate.RateLimit.RefillInterval, time.Second, "180/min is below one token per second")
 
@@ -45,6 +46,7 @@ func TestBuiltinManifestLimits(t *testing.T) {
 
 	bitpay := byID["bitpay"]
 	require.Equal(t, domain.VerifyStrategyRawHMAC, bitpay.VerifyStrategy)
+	require.True(t, bitpay.FetchMandatory)
 
 	btcpay := byID["btcpay"]
 	require.Zero(t, btcpay.RateLimit.Burst, "our own stand has no provider limits")
@@ -88,8 +90,13 @@ func TestManifestValidation(t *testing.T) {
 		"duplicate operation": func(m *domain.ProviderManifest) {
 			m.Operations = []string{domain.OperationInvoice, domain.OperationInvoice}
 		},
-		"raw without header":   func(m *domain.ProviderManifest) { m.VerifyHeader = "" },
-		"token without field":  func(m *domain.ProviderManifest) { m.VerifyStrategy = domain.VerifyStrategyTokenEcho },
+		"raw without header":  func(m *domain.ProviderManifest) { m.VerifyHeader = "" },
+		"token without field": func(m *domain.ProviderManifest) { m.VerifyStrategy = domain.VerifyStrategyTokenEcho },
+		"token without mandate": func(m *domain.ProviderManifest) {
+			m.VerifyStrategy = domain.VerifyStrategyTokenEcho
+			m.VerifyField = "token"
+		},
+		"missing secrets":      func(m *domain.ProviderManifest) { m.SecretPath = "" },
 		"unknown strategy":     func(m *domain.ProviderManifest) { m.VerifyStrategy = "magic" },
 		"bad capabilities":     func(m *domain.ProviderManifest) { m.CapabilitiesSource = "manual" },
 		"bad secret path":      func(m *domain.ProviderManifest) { m.SecretPath = "vault/provider" },

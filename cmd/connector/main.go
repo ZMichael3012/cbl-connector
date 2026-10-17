@@ -102,7 +102,13 @@ func main() {
 	// webhooks (17.2, T-CONNECTOR-03); fetch_required deliveries stay fail
 	// closed until the adapters of 17.6 - 17.9 register a status fetcher.
 	invoiceMapping := storage.NewProviderInvoicesRepository(db)
-	normalizer := usecase.NewNormalizer(registry, log, usecase.WithPaymentMapping(invoiceMapping))
+	normalizer := usecase.NewNormalizer(registry, log,
+		usecase.WithPaymentMapping(invoiceMapping),
+		usecase.WithFetchMandatory(func(provider string) bool {
+			manifest, ok := manifestRegistry.Lookup(provider)
+			return ok && manifest.FetchMandatory
+		}),
+	)
 
 	// Routing rules (3.4): PostgreSQL is the source of truth; Redis is only a
 	// cache, and its absence or failure does not affect the selection. The provider

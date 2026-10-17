@@ -77,15 +77,28 @@ func WithPaymentFetcher(fetcher PaymentStatusFetcher) NormalizerOption {
 	}
 }
 
+// WithFetchMandatory sets the providers whose deliveries always go through the
+// fetch-to-verify re-check, regardless of the raw fetch_required flag (the
+// manifest mandates of CoinGate and BitPay, CBL-003 section 4); the predicate
+// is backed by the manifest registry in main.
+func WithFetchMandatory(mandatory func(provider string) bool) NormalizerOption {
+	return func(n *Normalizer) {
+		if mandatory != nil {
+			n.fetchMandatory = mandatory
+		}
+	}
+}
+
 // Normalizer turns raw webhooks into canonical events through the outbox.
 // It implements inbox.Handler: it is called inside the guard transaction, so the
 // envelope is published atomically with the processing mark.
 type Normalizer struct {
-	registry *DecoderRegistry
-	mapping  PaymentMapping
-	fetcher  PaymentStatusFetcher
-	store    *outbox.Store
-	log      *zap.Logger
+	registry       *DecoderRegistry
+	mapping        PaymentMapping
+	fetcher        PaymentStatusFetcher
+	fetchMandatory func(provider string) bool
+	store          *outbox.Store
+	log            *zap.Logger
 }
 
 // NewNormalizer creates a Normalizer on top of the decoder registry.
@@ -112,7 +125,7 @@ func (n *Normalizer) Handle(ctx context.Context, tx *gorm.DB, msg inbox.Message)
 	if err := proto.Unmarshal(msg.Value, &raw); err != nil {
 		return fmt.Errorf("%w: unmarshal raw webhook: %w", domain.ErrInvalidWebhook, err)
 	}
-	provider := strings.TrimSpace(raw.GetProvider())
+	provider := strings.ToLower(strings.TrimSpace(raw.GetProvider()))
 	if state := verificationState(&raw); state != eventsv1.WebhookSignatureState_WEBHOOK_SIGNATURE_STATE_VERIFIED {
 		return fmt.Errorf("%w: provider %q state %s", domain.ErrUnsignedWebhook, provider, state)
 	}
@@ -120,7 +133,10 @@ func (n *Normalizer) Handle(ctx context.Context, tx *gorm.DB, msg inbox.Message)
 		event domain.CanonicalEvent
 		err   error
 	)
-	if raw.GetFetchRequired() {
+	// The provider key is normalized before every lookup (decoder registry,
+	// mapping, mandate predicate), so a differently-cased raw value cannot
+	// skip the fetch mandate of its provider.
+	if raw.GetFetchRequired() || n.fetchMandatoryFor(provider) {
 		event, err = n.fetchCanonical(ctx, &raw, provider)
 	} else {
 		event, err = n.decodeCanonical(ctx, &raw, provider)
@@ -145,6 +161,12 @@ func (n *Normalizer) Handle(ctx context.Context, tx *gorm.DB, msg inbox.Message)
 		zap.String("type", string(event.Type)),
 	)
 	return nil
+}
+
+// fetchMandatoryFor reports whether the provider manifest mandates the fetch
+// regardless of the raw flag; a nil predicate means "raw flag only".
+func (n *Normalizer) fetchMandatoryFor(provider string) bool {
+	return n.fetchMandatory != nil && n.fetchMandatory(provider)
 }
 
 // verificationState resolves the CF-4 verification result with the transition

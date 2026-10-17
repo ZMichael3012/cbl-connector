@@ -41,6 +41,10 @@ func TestFixturesCoverProviders(t *testing.T) {
 				assert.NotEmpty(t, fixtures.LookupPath, "real providers expose an order lookup")
 				assert.NotEmpty(t, fixtures.PayoutPath, "real providers list the payout operation")
 			}
+			if fixtures.PayoutExecutionPath != "" {
+				assert.NotEmpty(t, fixtures.PayoutExecutionTemplate, "a two-step payout fixture needs the execution response")
+				assert.NotEmpty(t, fixtures.PayoutExecutionGatewayID, "a two-step payout fixture needs the execution id")
+			}
 		})
 	}
 	_, ok := conformance.Fixtures("nope")

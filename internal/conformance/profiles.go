@@ -59,6 +59,13 @@ type ProfileFixtures struct {
 	PayoutTemplate []byte
 	// PayoutGatewayID sets the payout id embedded in the payout response.
 	PayoutGatewayID string
+	// PayoutExecutionPath sets the second payout call of two-step providers
+	// (the BTCPay payout against a pull payment; empty for single-call providers).
+	PayoutExecutionPath string
+	// PayoutExecutionTemplate sets the second payout response body.
+	PayoutExecutionTemplate []byte
+	// PayoutExecutionGatewayID sets the payout id of the second call.
+	PayoutExecutionGatewayID string
 	// Secret sets the webhook signing secret of the profile.
 	Secret []byte
 	// WebhookValid sets the valid webhook body.
@@ -299,28 +306,31 @@ func btcPayFixtures() ProfileFixtures {
 	}
 	valid := []byte(`{"deliveryId":"01a138fd-0000-7000-8000-0000000000d1","webhookId":"01a138fd-0000-7000-8000-0000000000d2","type":"InvoiceSettled","invoiceId":"0123456789abcdef0123456789abcdef","storeId":"mock-store","metadata":{"orderId":"order-1"}}`)
 	return ProfileFixtures{
-		Provider:         "btcpay",
-		CreatePath:       "POST /api/v1/stores/mock-store/invoices",
-		CreateStatus:     201,
-		CreateTemplate:   []byte(fmt.Sprintf(`{"id":"0123456789abcdef0123456789abcdef","storeId":"mock-store","amount":"12.340000","currency":"USDT","status":"New","checkoutLink":"https://mock-provider.local/btcpay/checkout/0123456789abcdef0123456789abcdef","createdTime":%d,"expirationTime":%d,"metadata":{"orderId":{{request.metadata.orderId}},"orderNetwork":"trc20"}}`, created, expiration)),
-		CreateGatewayID:  gatewayID,
-		OrderField:       "metadata.orderId",
-		PaymentPath:      "GET /api/v1/stores/mock-store/invoices/{gateway_id}",
-		PaymentGatewayID: gatewayID,
-		PaymentByStatus:  paymentPayloads(statuses, payment),
-		PaymentUnknown:   payment("totally_unknown"),
-		LookupPath:       "GET /api/v1/stores/mock-store/invoices?orderId={order}",
-		PayoutPath:       "POST /api/v1/stores/mock-store/pull-payments",
-		PayoutTemplate:   []byte(`{"id":"bt-payout-1","state":"Created"}`),
-		PayoutGatewayID:  "bt-payout-1",
-		Secret:           secret,
-		WebhookValid:     valid,
-		WebhookHeaders:   signHeaders("btcpay", secret, valid),
-		WebhookTampered:  valid,
-		TamperedHeaders:  tamperedHeaders(signHeaders("btcpay", secret, valid)),
-		WebhookMissing:   valid,
-		ExpectedEvent:    ExpectedEvent{GatewayID: gatewayID, RawStatus: "Settled", Type: domain.StateConfirmed},
-		Statuses:         statuses,
+		Provider:                 "btcpay",
+		CreatePath:               "POST /api/v1/stores/mock-store/invoices",
+		CreateStatus:             201,
+		CreateTemplate:           []byte(fmt.Sprintf(`{"id":"0123456789abcdef0123456789abcdef","storeId":"mock-store","amount":"12.340000","currency":"USDT","status":"New","checkoutLink":"https://mock-provider.local/btcpay/checkout/0123456789abcdef0123456789abcdef","createdTime":%d,"expirationTime":%d,"metadata":{"orderId":{{request.metadata.orderId}},"orderNetwork":"trc20"}}`, created, expiration)),
+		CreateGatewayID:          gatewayID,
+		OrderField:               "metadata.orderId",
+		PaymentPath:              "GET /api/v1/stores/mock-store/invoices/{gateway_id}",
+		PaymentGatewayID:         gatewayID,
+		PaymentByStatus:          paymentPayloads(statuses, payment),
+		PaymentUnknown:           payment("totally_unknown"),
+		LookupPath:               "GET /api/v1/stores/mock-store/invoices?orderId={order}",
+		PayoutPath:               "POST /api/v1/stores/mock-store/pull-payments",
+		PayoutTemplate:           []byte(`{"id":"bt-pp-1","name":"refund"}`),
+		PayoutGatewayID:          "bt-pp-1",
+		PayoutExecutionPath:      "POST /api/v1/pull-payments/{pull_payment_id}/payouts",
+		PayoutExecutionTemplate:  []byte(`{"id":"bt-payout-1","state":"AwaitingApproval","pullPaymentId":"bt-pp-1"}`),
+		PayoutExecutionGatewayID: "bt-payout-1",
+		Secret:                   secret,
+		WebhookValid:             valid,
+		WebhookHeaders:           signHeaders("btcpay", secret, valid),
+		WebhookTampered:          valid,
+		TamperedHeaders:          tamperedHeaders(signHeaders("btcpay", secret, valid)),
+		WebhookMissing:           valid,
+		ExpectedEvent:            ExpectedEvent{GatewayID: gatewayID, RawStatus: "Settled", Type: domain.StateConfirmed},
+		Statuses:                 statuses,
 	}
 }
 

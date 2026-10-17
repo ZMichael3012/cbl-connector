@@ -306,8 +306,12 @@ func checkOperations(adapter domain.PaymentGateway, wire *Wire, fixtures Profile
 	if err != nil {
 		return fmt.Errorf("create payout failed: %w", err)
 	}
-	if payout.GatewayPayoutID != fixtures.PayoutGatewayID {
-		return fmt.Errorf("payout id %q does not match the fixture %q", payout.GatewayPayoutID, fixtures.PayoutGatewayID)
+	expectedID := fixtures.PayoutExecutionGatewayID
+	if expectedID == "" {
+		expectedID = fixtures.PayoutGatewayID
+	}
+	if payout.GatewayPayoutID != expectedID {
+		return fmt.Errorf("payout id %q does not match the fixture %q", payout.GatewayPayoutID, expectedID)
 	}
 	return nil
 }

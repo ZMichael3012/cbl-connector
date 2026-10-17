@@ -8,7 +8,7 @@
 | Wave and parallel group | W5-PROVIDER |
 | Depends on | 17.2 (SPI v1, manifests), 17.4 (ingress strategies), 17.5 (conformance suite, mock profile) |
 | Contract version | none (adapter implements the existing SPI; no `.proto` change) |
-| Status | in progress (increment 1: adapter core, wiring, conformance and the mock-profile e2e; increment 2: the local BTCPay regtest stand run) |
+| Status | done (increment 1: adapter core, wiring, conformance and the mock-profile e2e; increment 2: the local BTCPay regtest stand and the sandbox run `E2E_Connector_BTCPayRegtest` PASS on 17.10.2026, mark `20261017t070157z`) |
 
 ## 1. Context and goal
 
@@ -27,12 +27,12 @@ payments), the interim static selector and the status-fetcher bridge, main
 wiring from environment, the connector compose stand with the mock-gateway
 `btcpay` profile, conformance and cross-service e2e runs.
 
-Out of scope: the local BTCPay regtest stand (increment 2, plan section 5);
-routing rules and failover (17.17 replaces the static selector); capabilities
-from the provider API and the asset catalog (17.21, 17.0); the payout approval
-flow details (17.11) and the refund orchestration (17.12); sandbox regressions
-(17.16); multi-store deployments (one store per adapter instance; a delivery of
-another store is rejected, E-9).
+Out of scope: routing rules and failover (17.17 replaces the static selector);
+capabilities from the provider API and the asset catalog (17.21, 17.0); the
+payout approval flow and its execution (17.11) and the refund orchestration
+(17.12); sandbox regressions (17.16); multi-store deployments (one store per
+adapter instance; a delivery of another store is rejected, E-9). The local
+BTCPay regtest stand is delivered by increment 2 of this task (section 10.4).
 
 ## 3. Architecture sketch
 
@@ -101,8 +101,9 @@ empty map).
 | Create invoice | `POST /api/v1/stores/{store}/invoices` with `{"amount","currency","metadata":{"orderId","orderNetwork"}}` | `{"id","storeId","amount","currency","status","checkoutLink","createdTime","expirationTime","metadata"}` |
 | Get invoice | `GET /api/v1/stores/{store}/invoices/{id}` | the same invoice body |
 | Invoice list for lookup | `GET /api/v1/stores/{store}/invoices?orderId={order}` | an array of invoice bodies (the mock profile answers a single object: the adapter parses both, D4) |
-| Create pull payment | `POST /api/v1/stores/{store}/pull-payments` with `{"name","amount","currency","payoutMethods":[{"destination","paymentMethod"}]}` | `{"id","state"}` |
-| Get pull payment | `GET /api/v1/stores/{store}/pull-payments/{id}` | `{"id","state"}` |
+| Create pull payment | `POST /api/v1/stores/{store}/pull-payments` with `{"name","amount","currency","payoutMethods":["BTC"]}` (method ids are strings, verified against the regtest stand) | the pull payment object (only `id` is consumed) |
+| Create payout | `POST /api/v1/pull-payments/{pullPaymentId}/payouts` with `{"destination","amount","payoutMethodId":"BTC-CHAIN"}` | `{"id","state","pullPaymentId"}` |
+| Get payout | `GET /api/v1/stores/{store}/payouts/{payoutId}` | the payout body |
 
 Auth: `Authorization: token <APIToken>` on every call. Webhooks:
 `BTCPay-Sig: sha256=<hex HMAC-SHA256 over the raw body, WebhookSecret>`; a missing
@@ -138,7 +139,7 @@ of the asset from the adapter capabilities; `amount` is emitted via
 `money.String()` (exact, no float). Times: Unix seconds -> RFC 3339 UTC.
 
 Error classification: transport errors, 429 and 5xx -> `ErrTemporary`; an
-unfollowed 3xx redirect -> `ErrTemporary`; 404 on a payment or pull payment read
+unfollowed 3xx redirect -> `ErrTemporary`; 404 on a payment or payout read
 -> `ErrGatewayNotFound`; other 4xx -> `ErrRejected`; an asset outside the
 configured capabilities at runtime -> `ErrRejected` (config faults fail at
 startup); malformed JSON -> a wrapped plain error (sanitized upstream).
@@ -159,9 +160,11 @@ VerifyWebhook: kit raw-HMAC strategy (header `BTCPay-Sig`, SHA-256, hex,
 prefix `sha256=`) over the raw body -> parse type -> canonical event
 (OccurredAt = receipt time; the webhook carries no event time).
 
-CreatePayout/CreateRefund: pull payment creation (`name` = platform payout or
-refund reference, `payoutMethods[0].destination` = the recipient address); the
-approval flow is 17.11/17.12.
+CreatePayout/CreateRefund: the two-step provider flow verified against the
+regtest stand: the pull payment holds the funds and lists the method ids
+(`["BTC"]`), the payout against it carries the destination and the method
+(`BTC-CHAIN`); the created payout usually awaits operator approval (17.11/17.12)
+and is reported as `submitted` whatever its state word (E-5).
 
 ### 3.4. Storage and migrations
 
@@ -183,16 +186,26 @@ faults, fail fast at startup). No new core error classes.
 - D2. Capabilities come from configuration (`CONNECTOR_BTCPAY_CAPABILITIES`)
   until the catalog artifact (17.21) and the provider API source (17.0) land;
   the manifest keeps `capabilities_source: api` as the target.
-- D3. Payouts and refunds use pull payments (plan section 3.7/3.8); the
-  two-phase approval and the refund statuses are 17.11/17.12.
+- D3. Payouts and refunds use the two-step pull payment flow of the provider
+  (plan section 3.7/3.8); the two-phase approval and the payout execution are
+  17.11/17.12. The wire shapes were verified against the regtest stand in
+  increment 2 (the first implementation posted destination inside the pull
+  payment and was corrected by the sandbox run). Known exposure (review E-11):
+  the whole `CreatePayout` is retried by the resilience stack on a temporary
+  failure, so a lost response after the pull payment (or payout) creation can
+  leave an orphan object at the provider; funds only move through the operator
+  approval of the returned payout id (17.11), and the pull payment name carries
+  the platform payout id, so 17.11 must approve only the returned id and may
+  dedupe by that name before payouts become reachable from a service RPC.
 - D4. The lookup parser accepts an array (real Greenfield) and a single object
   (the conformance wire answers a single object); the mock stand itself has no
   lookup route (17.5 defined lookup as fixture-side), so against the compose
   stand a lookup answers 404 and surfs as `ErrGatewayNotFound`. Documented stand
   aid, owned by 17.16.
-- D5. `paymentMethod` of pull payments defaults to the asset code (the regtest
-  stand accepts it); the network-to-payment-method mapping arrives with the
-  catalog (17.21). Rejected: inventing `BTC-Bitcoin` style strings now.
+- D5. The on-chain method id sent with a payout is `"<ASSET>-CHAIN"` and the
+  pull payment lists method ids as plain strings; both verified against BTCPay
+  2.0.6 in increment 2. The catalog mapping (17.21) refines the method id for
+  altcoin plugin methods.
 - D6. The adapter is wrapped by `gateway.Resilient` in the composition root
   (T-CONNECTOR-16): every provider call passes the shared retry/breaker/bulkhead
   and attempt timeouts; the manifest rate limiter is wired when a manifest
@@ -253,9 +266,10 @@ E-3. Webhook with an unknown `type` -> `ErrUnknownState`; the normalizer routes
 it to the DLQ (fail closed).
 E-4. Webhook without `metadata.orderId` -> PaymentID empty; the normalizer
 resolves the payment through `provider_invoices` (17.2).
-E-5. Pull payment creation answered with an unknown state -> `GetPayout`
-returns `ErrUnknownState`; `CreatePayout` accepts the created id whatever the
-state (the status read classifies).
+E-5. The two-step payout creation returns the payout id and the `submitted`
+state whatever the provider state word; `GetPayout` classifies the states
+(`AwaitingApproval`/`AwaitingPayment`/`InProgress` -> submitted, `Completed` ->
+confirmed, `Cancelled` -> failed, unknown -> `ErrUnknownState`).
 E-6. Amount with more fraction digits than the asset decimals in a provider
 response -> parse error (provider data fault, sanitized upstream).
 E-7. `CONNECTOR_BTCPAY_CAPABILITIES` missing or invalid at startup -> the
@@ -269,6 +283,12 @@ with `ErrInvalidWebhook` (multi-store deployments are out of scope).
 E-10. A runtime asset outside the configured capabilities is rejected with
 `ErrRejected` (the transport maps it to `FailedPrecondition`); configuration
 gaps still fail at startup.
+E-11. The two-step payout creation is retried as a whole by the resilience
+stack; a temporary failure after the first step can leave an orphan pull
+payment (and, with a lost second response, an extra payout awaiting approval).
+No funds move without the operator approval (17.11), and the pull payment name
+carries the platform payout id for dedupe; 17.11/17.12 own the compensation
+before payouts become reachable from a service RPC.
 
 ## 9. Non-functional requirements
 
@@ -292,8 +312,8 @@ gaps still fail at startup.
 | A-05 | payment 404 | wire answers 404 | ErrGatewayNotFound |
 | A-06 | webhook verification | valid signature; tampered body; missing header; unknown type | event with mapped state/raw/ids; rejections wrap ErrUnsignedWebhook; unknown -> ErrUnknownState |
 | A-07 | lookup | object answer; array answer; empty array; 404 | status; first element; ErrGatewayNotFound; ErrGatewayNotFound |
-| A-08 | create payout | wire asserts pull-payment body (name, destination, amount) | id and state parsed; Created -> submitted |
-| A-09 | get payout | Created / Completed / Cancelled / unknown | submitted / confirmed / failed / ErrUnknownState |
+| A-08 | create payout (two-step) | wire asserts the pull payment body (name, amount, currency, `payoutMethods` string ids) and the payout body (destination, amount, `payoutMethodId` `BTC-CHAIN`); response ids | the payout id of the second call and the submitted state parsed |
+| A-09 | get payout | AwaitingApproval / AwaitingPayment / InProgress / Completed / Cancelled / unknown | submitted x3 / confirmed / failed / ErrUnknownState |
 | A-10 | create refund | address present; address missing | pull payment created with the refund name; ErrRejected without a destination |
 | A-11 | amount parse fault | response amount with too many digits | error |
 
@@ -314,7 +334,7 @@ gaps still fail at startup.
 | Scenario | Description | Tag or stand |
 | :-- | :-- | :-- |
 | E2E_Connector_BTCPayProfile (increment 1) | compose stand: connector with `CONNECTOR_BTCPAY_*` pointing at the mock-gateway `btcpay` profile; `CreateInvoice` via grpcurl returns a 32-hex id and a checkout link; `GetGatewayPayment` answers the canonical state of `New`; the mock invoice is advanced with `POST /api/v1/simulate` `provider=btcpay` `status=confirmed`; `GetGatewayPayment` then answers `CONFIRMED` with raw `Settled` | `test/e2e/E2E.md` |
-| E2E_Connector_BTCPayRegtest (increment 2) | local BTCPay regtest stand (server, NBXplorer, bitcoind): store config, invoice creation, regtest payment, webhook to the ingress contract, refund pull payment | plan section 5, run artifacts in `.runs/` |
+| E2E_Connector_BTCPayRegtest (increment 2) | local BTCPay regtest stand (`test/e2e/btcpay-stand/docker-compose.yml`: bitcoind, NBXplorer, BTCPay Server 2.0.6, postgres, sink, connector): programmatic stand setup (admin, API key, store, webhook, watch-only wallet), invoice created through `ConnectorService`, paid from the regtest node, `GetGatewayPayment` settles to `CONFIRMED`/`Settled`, provider order lookup finds the invoice, deliveries succeed and the `BTCPay-Sig` verifies offline over the raw body, the refund wire shape (pull payment + payout awaiting approval) is accepted | `test/e2e/E2E.md`, PASS 17.10.2026 mark `20261017t070157z` |
 
 ### 10.5. Load plan
 
@@ -337,8 +357,16 @@ forwarding, the BTCPay fetch mandate, the amount decimals/asset validation in th
 transport, asset-scale classification and the capability index, the store check of
 webhooks, env validation hardening, and the documentation alignment).
 
+Increment 2 evidence: the sandbox run `E2E_Connector_BTCPayRegtest` PASS
+(mark `20261017t070157z`, 18/18 checks) on the real BTCPay Server 2.0.6 regtest
+stand; the run caught and corrected a real API mismatch (the two-step payout
+flow: pull payment method ids are strings, the destination belongs to the
+payout). Review closure round for increment 2: the four reviewers on the
+increment diff, findings closed before the commit.
+
 ## 11. Work plan and commits
 
-Increment 1 (this commit): spec, adapter, bridges, main wiring, tests, compose
-and E2E.md additions, AGENTS/README. Increment 2 (follow-up commit): the BTCPay
-regtest stand and its run.
+Increment 1 (commit `019cd9a`): spec, adapter, bridges, main wiring, tests,
+compose and E2E.md additions, AGENTS/README. Increment 2 (this commit): the
+BTCPay regtest stand, the sandbox scenario run, the two-step payout correction
+and the documentation updates.

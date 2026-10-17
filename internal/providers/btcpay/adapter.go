@@ -160,10 +160,17 @@ type invoiceResponse struct {
 	Metadata       map[string]string `json:"metadata"`
 }
 
-// pullPaymentResponse describes the Greenfield pull payment body.
+// pullPaymentResponse describes the Greenfield pull payment body (only the id
+// is consumed; the stand returns the full object).
 type pullPaymentResponse struct {
-	ID    string `json:"id"`
-	State string `json:"state"`
+	ID string `json:"id"`
+}
+
+// payoutResponse describes the Greenfield payout body.
+type payoutResponse struct {
+	ID            string `json:"id"`
+	State         string `json:"state"`
+	PullPaymentID string `json:"pullPaymentId"`
 }
 
 // CreateInvoice creates a hosted invoice in the store.
@@ -301,57 +308,50 @@ var invoiceStates = map[string]domain.State{
 	"Invalid":    domain.StateFailed,
 }
 
-// pullPaymentStates maps Greenfield pull payment states to canonical payouts.
-var pullPaymentStates = map[string]domain.PayoutState{
-	"Created":   domain.PayoutSubmitted,
-	"Completed": domain.PayoutConfirmed,
-	"Cancelled": domain.PayoutFailed,
+// payoutStates maps Greenfield payout states to canonical payout states.
+var payoutStates = map[string]domain.PayoutState{
+	"AwaitingApproval": domain.PayoutSubmitted,
+	"AwaitingPayment":  domain.PayoutSubmitted,
+	"InProgress":       domain.PayoutSubmitted,
+	"Completed":        domain.PayoutConfirmed,
+	"Cancelled":        domain.PayoutFailed,
 }
 
-// CreatePayout creates a pull payment for the recipient; the approval flow is
-// task 17.11. The creation succeeds whatever state the provider reports: the
-// status read classifies it (spec E-5).
+// CreatePayout pays the recipient through the two-step pull payment flow of the
+// provider (verified against the regtest stand in 17.9): the pull payment holds
+// the funds and lists the methods, the payout carries the destination. The
+// created payout usually awaits operator approval (17.11) and is reported as
+// submitted whatever its state word (spec E-5).
 func (a *Adapter) CreatePayout(ctx context.Context, req domain.PayoutRequest) (domain.Payout, error) {
 	if strings.TrimSpace(req.Address) == "" {
 		return domain.Payout{}, fmt.Errorf("%w: payout destination is required", domain.ErrRejected)
 	}
-	if _, err := a.decimalsFor(req.Amount.Asset); err != nil {
-		return domain.Payout{}, err
-	}
-	payload, err := a.request(ctx, http.MethodPost, a.storePath("/pull-payments"), a.pullPaymentBody(
-		req.PayoutID, req.Amount, req.Address), domain.ErrRejected)
+	payoutID, err := a.createPayout(ctx, req.PayoutID, req.Amount, req.Address)
 	if err != nil {
 		return domain.Payout{}, err
 	}
-	var decoded pullPaymentResponse
-	if err := json.Unmarshal(payload, &decoded); err != nil {
-		return domain.Payout{}, fmt.Errorf("btcpay: decode payout response: %w", err)
-	}
-	if decoded.ID == "" {
-		return domain.Payout{}, errors.New("btcpay: payout response has no id")
-	}
-	return domain.Payout{GatewayPayoutID: decoded.ID, Provider: "btcpay", State: domain.PayoutSubmitted}, nil
+	return domain.Payout{GatewayPayoutID: payoutID, Provider: "btcpay", State: domain.PayoutSubmitted}, nil
 }
 
-// GetPayout reads the pull payment state.
+// GetPayout reads the payout state through the store payout endpoint.
 func (a *Adapter) GetPayout(ctx context.Context, gatewayPayoutID string) (domain.PayoutStatus, error) {
-	payload, err := a.request(ctx, http.MethodGet, a.storePath("/pull-payments/"+url.PathEscape(gatewayPayoutID)), nil, domain.ErrGatewayNotFound)
+	payload, err := a.request(ctx, http.MethodGet, a.storePath("/payouts/"+url.PathEscape(gatewayPayoutID)), nil, domain.ErrGatewayNotFound)
 	if err != nil {
 		return domain.PayoutStatus{}, err
 	}
-	var decoded pullPaymentResponse
+	var decoded payoutResponse
 	if err := json.Unmarshal(payload, &decoded); err != nil {
 		return domain.PayoutStatus{}, fmt.Errorf("btcpay: decode payout status: %w", err)
 	}
-	state, ok := pullPaymentStates[decoded.State]
+	state, ok := payoutStates[decoded.State]
 	if !ok {
 		return domain.PayoutStatus{}, fmt.Errorf("%w: payout state %q", domain.ErrUnknownState, decoded.State)
 	}
 	return domain.PayoutStatus{State: state}, nil
 }
 
-// CreateRefund creates a pull payment for the refund destination; the refund
-// orchestration is task 17.12.
+// CreateRefund creates a pull payment and a payout for the refund destination;
+// the refund orchestration is task 17.12.
 func (a *Adapter) CreateRefund(ctx context.Context, req domain.RefundRequest) (domain.Refund, error) {
 	if strings.TrimSpace(req.RefundInvoiceID) == "" {
 		return domain.Refund{}, fmt.Errorf("%w: refund reference is required", domain.ErrRejected)
@@ -359,36 +359,54 @@ func (a *Adapter) CreateRefund(ctx context.Context, req domain.RefundRequest) (d
 	if strings.TrimSpace(req.Address) == "" {
 		return domain.Refund{}, fmt.Errorf("%w: refund destination is required", domain.ErrRejected)
 	}
-	if _, err := a.decimalsFor(req.Amount.Asset); err != nil {
-		return domain.Refund{}, err
-	}
-	payload, err := a.request(ctx, http.MethodPost, a.storePath("/pull-payments"), a.pullPaymentBody(
-		"refund-"+req.RefundInvoiceID, req.Amount, req.Address), domain.ErrRejected)
+	payoutID, err := a.createPayout(ctx, "refund-"+req.RefundInvoiceID, req.Amount, req.Address)
 	if err != nil {
 		return domain.Refund{}, err
 	}
-	var decoded pullPaymentResponse
-	if err := json.Unmarshal(payload, &decoded); err != nil {
-		return domain.Refund{}, fmt.Errorf("btcpay: decode refund response: %w", err)
-	}
-	if decoded.ID == "" {
-		return domain.Refund{}, errors.New("btcpay: refund response has no id")
-	}
-	return domain.Refund{GatewayRefundID: decoded.ID, Provider: "btcpay", Amount: req.Amount}, nil
+	return domain.Refund{GatewayRefundID: payoutID, Provider: "btcpay", Amount: req.Amount}, nil
 }
 
-// pullPaymentBody builds the pull payment request; the payment method defaults
-// to the asset code until the catalog mapping lands (spec D5).
-func (a *Adapter) pullPaymentBody(name string, amount money.Money, destination string) map[string]any {
-	return map[string]any{
+// createPayout performs the two provider calls and returns the payout id.
+func (a *Adapter) createPayout(ctx context.Context, name string, amount money.Money, destination string) (string, error) {
+	if _, err := a.decimalsFor(amount.Asset); err != nil {
+		return "", err
+	}
+	pullBody := map[string]any{
 		"name":     name,
 		"amount":   amount.String(),
 		"currency": strings.ToUpper(strings.TrimSpace(amount.Asset)),
-		"payoutMethods": []map[string]string{{
-			"destination":   destination,
-			"paymentMethod": strings.ToUpper(strings.TrimSpace(amount.Asset)),
-		}},
+		"payoutMethods": []string{
+			strings.ToUpper(strings.TrimSpace(amount.Asset)),
+		},
 	}
+	payload, err := a.request(ctx, http.MethodPost, a.storePath("/pull-payments"), pullBody, domain.ErrRejected)
+	if err != nil {
+		return "", err
+	}
+	var pullPayment pullPaymentResponse
+	if err := json.Unmarshal(payload, &pullPayment); err != nil {
+		return "", fmt.Errorf("btcpay: decode pull payment response: %w", err)
+	}
+	if pullPayment.ID == "" {
+		return "", errors.New("btcpay: pull payment response has no id")
+	}
+	payoutBody := map[string]any{
+		"destination":    destination,
+		"amount":         amount.String(),
+		"payoutMethodId": strings.ToUpper(strings.TrimSpace(amount.Asset)) + "-CHAIN",
+	}
+	payload, err = a.request(ctx, http.MethodPost, "/api/v1/pull-payments/"+url.PathEscape(pullPayment.ID)+"/payouts", payoutBody, domain.ErrRejected)
+	if err != nil {
+		return "", err
+	}
+	var payout payoutResponse
+	if err := json.Unmarshal(payload, &payout); err != nil {
+		return "", fmt.Errorf("btcpay: decode payout response: %w", err)
+	}
+	if payout.ID == "" {
+		return "", errors.New("btcpay: payout response has no id")
+	}
+	return payout.ID, nil
 }
 
 // decimalsFor resolves the asset decimals from the configuration index; an

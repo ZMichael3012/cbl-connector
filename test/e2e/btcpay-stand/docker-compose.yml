@@ -1,0 +1,121 @@
+name: cbl-btcpay-stand
+# Stand-only placeholders: the regtest RPC password, the BTCPay admin password
+# used by the setup flow and the webhook secret are test values; never copy
+# them into a real stand (production secrets come from Vault).
+services:
+  bitcoind:
+    image: ruimarinho/bitcoin-core:24.0.1
+    command:
+      - -regtest
+      - -server=1
+      - -printtoconsole
+      - -rpcuser=btcpay
+      - -rpcpassword=btcpaypass
+      - -rpcallowip=0.0.0.0/0
+      - -rpcbind=0.0.0.0
+      - -txindex=1
+      - -fallbackfee=0.0001
+    volumes:
+      - bitcoind-data:/home/bitcoin/.bitcoin
+    networks: [btcpay-net]
+
+  nbxplorer:
+    image: nicolasdorier/nbxplorer:2.5.14
+    environment:
+      NBXPLORER_NETWORK: regtest
+      NBXPLORER_BIND: 0.0.0.0:32838
+      NBXPLORER_CHAINS: btc
+      NBXPLORER_SIGNALFILESDIR: /datadir
+      NBXPLORER_BTCRPCURL: http://bitcoind:18443/
+      NBXPLORER_BTCRPCUSER: btcpay
+      NBXPLORER_BTCRPCPASSWORD: btcpaypass
+      NBXPLORER_BTCNODEENDPOINT: bitcoind:18444
+      NBXPLORER_POSTGRES: Host=postgres;Port=5432;Database=nbxplorer;Username=btcpay;Password=btcpay
+      NBXPLORER_COOKIEFILE: /datadir/.cookie
+    volumes:
+      - nbxplorer-data:/datadir
+    restart: on-failure
+    depends_on:
+      bitcoind:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    networks: [btcpay-net]
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: btcpay
+      POSTGRES_PASSWORD: btcpay
+      POSTGRES_DB: btcpay
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U btcpay -d btcpay"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - btcpay-pg-data:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    networks: [btcpay-net]
+
+  btcpay:
+    image: btcpayserver/btcpayserver:2.0.6
+    environment:
+      BTCPAY_NETWORK: regtest
+      BTCPAY_BIND: 0.0.0.0:49392
+      BTCPAY_ROOTPATH: /
+      BTCPAY_CHAINS: btc
+      BTCPAY_BTCEXPLORERURL: http://nbxplorer:32838/
+      BTCPAY_BTCEXPLORERCOOKIEFILE: /nbxplorer/RegTest/.cookie
+      BTCPAY_POSTGRES: Host=postgres;Port=5432;Database=btcpay;Username=btcpay;Password=btcpay
+    volumes:
+      - btcpay-data:/datadir
+      - nbxplorer-data:/nbxplorer:ro
+    ports:
+      - "49392:49392"
+    restart: on-failure
+    depends_on:
+      nbxplorer:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    networks: [btcpay-net]
+
+  sink:
+    image: python:3.12-alpine
+    command: ["python", "/sink/sink.py"]
+    volumes:
+      - ./sink:/sink:ro
+    networks: [btcpay-net]
+
+  connector:
+    profiles: ["connector"]
+    build:
+      context: ../../../..
+      dockerfile: cbl-connector/Dockerfile
+    environment:
+      HTTP_ADDR: ":8050"
+      GRPC_ADDR: ":9050"
+      METRICS_ADDR: ":9250"
+      PG_DSN: postgres://btcpay:btcpay@postgres:5432/connector?sslmode=disable
+      CONNECTOR_BTCPAY_BASE_URL: http://btcpay:49392
+      CONNECTOR_BTCPAY_STORE_ID: ${BTC_STAND_STORE_ID:-}
+      CONNECTOR_BTCPAY_API_TOKEN: ${BTC_STAND_API_KEY:-}
+      CONNECTOR_BTCPAY_WEBHOOK_SECRET: e2e-btcpay-wh-secret
+      CONNECTOR_BTCPAY_CAPABILITIES: '[{"network":"btc","asset":"BTC","min_minor":1000,"decimals":8,"confirmations":2}]'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      btcpay:
+        condition: service_started
+    networks: [btcpay-net]
+
+volumes:
+  bitcoind-data:
+  nbxplorer-data:
+  btcpay-data:
+  btcpay-pg-data:
+
+networks:
+  btcpay-net:
+    driver: bridge

@@ -495,11 +495,20 @@ func TestLookupByOrderID(t *testing.T) {
 
 func TestCreatePayout(t *testing.T) {
 	t.Parallel()
-	var captured string
+	var pullBody, payoutBody string
 	server := wireServer(t, func(w http.ResponseWriter, r *http.Request) {
-		captured = readBody(t, r)
-		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"id":"pp-1","state":"Created"}`))
+		switch r.URL.Path {
+		case "/api/v1/stores/" + testStoreID + "/pull-payments":
+			pullBody = readBody(t, r)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"pp-1","state":"Active"}`))
+		case "/api/v1/pull-payments/pp-1/payouts":
+			payoutBody = readBody(t, r)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"po-1","state":"AwaitingApproval","pullPaymentId":"pp-1"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
 	})
 	adapter, err := btcpay.New(testConfig(server.URL))
 	require.NoError(t, err)
@@ -511,62 +520,77 @@ func TestCreatePayout(t *testing.T) {
 		Address:        "bcrt1qexample",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "pp-1", payout.GatewayPayoutID)
+	assert.Equal(t, "po-1", payout.GatewayPayoutID)
 	assert.Equal(t, domain.PayoutSubmitted, payout.State)
 	assert.Equal(t, "btcpay", payout.Provider)
 
 	var sent map[string]any
-	require.NoError(t, json.Unmarshal([]byte(captured), &sent))
+	require.NoError(t, json.Unmarshal([]byte(pullBody), &sent))
 	assert.Equal(t, "payout-1", sent["name"])
 	assert.Equal(t, "0.00100000", sent["amount"])
 	assert.Equal(t, "BTC", sent["currency"])
 	methods, ok := sent["payoutMethods"].([]any)
 	require.True(t, ok)
 	require.Len(t, methods, 1)
-	method := methods[0].(map[string]any)
-	assert.Equal(t, "bcrt1qexample", method["destination"])
-	assert.NotEmpty(t, method["paymentMethod"])
+	assert.Equal(t, "BTC", methods[0], "the pull payment lists method ids as strings (verified against the regtest stand)")
+
+	require.NoError(t, json.Unmarshal([]byte(payoutBody), &sent))
+	assert.Equal(t, "bcrt1qexample", sent["destination"])
+	assert.Equal(t, "0.00100000", sent["amount"])
+	assert.Equal(t, "BTC-CHAIN", sent["payoutMethodId"], "the payout carries the destination and the chain method id")
 }
 
 func TestGetPayoutStatusMapping(t *testing.T) {
 	t.Parallel()
 	cases := map[string]domain.PayoutState{
-		"Created":   domain.PayoutSubmitted,
-		"Completed": domain.PayoutConfirmed,
-		"Cancelled": domain.PayoutFailed,
+		"AwaitingApproval": domain.PayoutSubmitted,
+		"AwaitingPayment":  domain.PayoutSubmitted,
+		"InProgress":       domain.PayoutSubmitted,
+		"Completed":        domain.PayoutConfirmed,
+		"Cancelled":        domain.PayoutFailed,
 	}
 	for raw, expected := range cases {
 		raw, expected := raw, expected
 		t.Run(raw, func(t *testing.T) {
 			t.Parallel()
-			server := wireServer(t, func(w http.ResponseWriter, _ *http.Request) {
-				_, _ = w.Write([]byte(`{"id":"pp-1","state":"` + raw + `"}`))
+			server := wireServer(t, func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/api/v1/stores/"+testStoreID+"/payouts/po-1", r.URL.Path)
+				_, _ = w.Write([]byte(`{"id":"po-1","state":"` + raw + `"}`))
 			})
 			adapter, err := btcpay.New(testConfig(server.URL))
 			require.NoError(t, err)
-			status, err := adapter.GetPayout(context.Background(), "pp-1")
+			status, err := adapter.GetPayout(context.Background(), "po-1")
 			require.NoError(t, err)
 			assert.Equal(t, expected, status.State)
 		})
 	}
 
 	unknown := wireServer(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"id":"pp-1","state":"Weird"}`))
+		_, _ = w.Write([]byte(`{"id":"po-1","state":"Weird"}`))
 	})
 	adapter, err := btcpay.New(testConfig(unknown.URL))
 	require.NoError(t, err)
-	_, err = adapter.GetPayout(context.Background(), "pp-1")
+	_, err = adapter.GetPayout(context.Background(), "po-1")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, domain.ErrUnknownState))
 }
 
 func TestCreateRefund(t *testing.T) {
 	t.Parallel()
-	var captured string
+	var pullBody, payoutBody string
+	calls := 0
 	server := wireServer(t, func(w http.ResponseWriter, r *http.Request) {
-		captured = readBody(t, r)
-		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"id":"pp-9","state":"Created"}`))
+		calls++
+		switch r.URL.Path {
+		case "/api/v1/stores/" + testStoreID + "/pull-payments":
+			pullBody = readBody(t, r)
+			_, _ = w.Write([]byte(`{"id":"pp-9","state":"Active"}`))
+		case "/api/v1/pull-payments/pp-9/payouts":
+			payoutBody = readBody(t, r)
+			_, _ = w.Write([]byte(`{"id":"po-9","state":"AwaitingApproval","pullPaymentId":"pp-9"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
 	})
 	adapter, err := btcpay.New(testConfig(server.URL))
 	require.NoError(t, err)
@@ -579,16 +603,18 @@ func TestCreateRefund(t *testing.T) {
 		Address:         "bcrt1qrefund",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "pp-9", refund.GatewayRefundID)
+	assert.Equal(t, "po-9", refund.GatewayRefundID)
 	assert.Equal(t, "btcpay", refund.Provider)
 	assert.Equal(t, int64(50000), refund.Amount.MinorUnits)
 
 	var sent map[string]any
-	require.NoError(t, json.Unmarshal([]byte(captured), &sent))
+	require.NoError(t, json.Unmarshal([]byte(pullBody), &sent))
 	assert.Equal(t, "refund-refund-1", sent["name"])
-	methods := sent["payoutMethods"].([]any)
-	assert.Equal(t, "bcrt1qrefund", methods[0].(map[string]any)["destination"])
+	require.NoError(t, json.Unmarshal([]byte(payoutBody), &sent))
+	assert.Equal(t, "bcrt1qrefund", sent["destination"])
+	assert.Equal(t, "BTC-CHAIN", sent["payoutMethodId"])
 
+	before := calls
 	_, err = adapter.CreateRefund(context.Background(), domain.RefundRequest{
 		IdempotencyKey:  "k-2",
 		RefundInvoiceID: "refund-2",
@@ -598,4 +624,5 @@ func TestCreateRefund(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, domain.ErrRejected), "a refund without a destination address must be rejected: %v", err)
+	assert.Equal(t, before, calls, "the rejection happens before any provider call")
 }

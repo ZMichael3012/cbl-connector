@@ -20,6 +20,7 @@ scenario with poison-pill cases runs separately on testcontainers (`make test-e2
 | :-- | :-- | :-- |
 | `E2E_Connector_Smoke` | compose stand up, goose migrations applied (success log line, no failure line), `webhook normalizer started`, healthz/readyz, the admin contour answers `GetRoutingRules` (revision 0) | CBL-3.5 pipeline start, administrative endpoints, `ConnectorAdminService` (CBL-12.2) |
 | `E2E_Connector_BTCPayProfile` | compose stand with the mock-gateway `btcpay` profile: `ConnectorService/CreateInvoice` answers a 32-hex invoice id, provider `btcpay` and a checkout link; `GetGatewayPayment` answers the detected state with raw `New`; after `POST /api/v1/simulate provider=btcpay status=confirmed` on the mock the read answers the confirmed state with raw `Settled` | the BTCPay adapter against the CBL-17.5 profile wire contract (cross-service) |
+| `E2E_Connector_BTCPayRegtest` | local BTCPay regtest stand: programmatic setup (admin, API key, store, webhook, watch-only wallet), regtest funding; an invoice created through `ConnectorService` is paid from the node, `GetGatewayPayment` settles to `CONFIRMED`/`Settled`; the provider order lookup finds the invoice; deliveries succeed and `BTCPay-Sig` verifies offline over the raw delivery body; the refund wire shape (pull payment with string method ids plus a payout `AwaitingApproval`) is accepted | the BTCPay adapter against the real Greenfield API (BTCPay Server 2.0.6) |
 
 ## 2. Isolation and parallelism
 
@@ -89,7 +90,51 @@ scenario with poison-pill cases runs separately on testcontainers (`make test-e2
    (`CONFIRMED`) with `rawStatus` = `Settled`.
 6. Checks go to `smoke-checks.txt`.
 
-## 6. Mandatory run artifacts
+## 6. E2E_Connector_BTCPayRegtest
+
+Stand: `test/e2e/btcpay-stand/docker-compose.yml` (bitcoind regtest, NBXplorer
+2.5.14, BTCPay Server 2.0.6, postgres, the sink logger, the connector built from
+this repository; the sibling repositories `../cbl-kit` and `../cbl-protos` must
+be checked out, the build context is the `services/` directory). Prerequisites:
+the `btcpayserver/btcpayserver:2.0.6`, `nicolasdorier/nbxplorer:2.5.14`,
+`ruimarinho/bitcoin-core:24.0.1`, `postgres:16-alpine` and `python:3.12-alpine`
+images (about 1.5 GiB), roughly 5 minutes of runtime. Run the stand under a
+per-mark project name (`-p cbl-btcpay-e2e-<mark>`), which also decides the
+network name (`<project>_btcpay-net`); only port 49392 is published, and the
+connector is reached in-network with
+`docker run --rm -i --network <project>_btcpay-net -v <protos>:/p fullstorydev/grpcurl:v1.9.1 -plaintext -import-path /p -proto billing/connector/v1/connector.proto ... connector:9050 <method>`.
+The stand connector runs without Kafka and Redis: the webhook normalizer is
+disabled there (its pathway is covered by the testcontainers e2e), and the
+scenario exercises the money path (create/read), the provider delivery log and
+the refund wire shapes.
+
+1. Start the stand fresh (`down -v` then `up -d bitcoind nbxplorer postgres
+   btcpay sink`), wait for `GET http://localhost:49392/api/v1/health` = 200.
+2. Programmatic setup through the Greenfield API: create the first admin user,
+   create an API key (Basic auth) with store settings, invoice, pull payment and
+   payout permissions, create the store, register the webhook
+   `http://sink/btcpay` with the secret `e2e-btcpay-wh-secret`, generate the
+   watch-only store wallet, then fund the node (`createwallet`, 101 blocks).
+3. Start the connector profile with the stand credentials in
+   `BTC_STAND_STORE_ID`/`BTC_STAND_API_KEY` and wait for the admin gRPC to answer.
+4. Create an invoice through `ConnectorService/CreateInvoice` (100000 sats,
+   order id `<fresh UUID>`); the answer carries the provider invoice id and the
+   checkout link.
+5. Read the invoice payment address (`GET .../invoices/{id}/payment-methods`), pay
+   it from the node (`sendtoaddress`), mine two blocks, then poll
+   `GetGatewayPayment` until `CONFIRMED` with `rawStatus` `Settled`.
+6. Verify the provider order lookup (`GET .../invoices?orderId=<uuid>`).
+7. Verify the webhook: deliveries exist with `HttpSuccess`; the sink log records
+   `BTCPay-Sig`; recompute the HMAC-SHA256 over the delivery body and compare
+   with the header and the body hash (offline verification).
+8. Verify the refund wire shape: create a pull payment
+   (`payoutMethods:["BTC"]`) and a payout against it (`payoutMethodId`
+   `BTC-CHAIN`); the payout answers `AwaitingApproval` (the approval flow is
+   17.11).
+9. Artifacts as in section 7 plus the setup and webhook transcripts; stop the
+   stand with `down -v`.
+
+## 7. Mandatory run artifacts
 
 - `summary.md` (template `.additionals/summary.template.md`; PASS/FAIL verdict, steps,
   key values, artifact list, time);
@@ -98,12 +143,12 @@ scenario with poison-pill cases runs separately on testcontainers (`make test-e2
 - `smoke.log` (curl transcripts) and `smoke-checks.txt`;
 - on failure: container states and the connector log fragments around the failure.
 
-## 7. Auxiliary files (.additionals)
+## 8. Auxiliary files (.additionals)
 
 - `summary.template.md` - the `summary.md` template;
 - `inventory.md` - the list of auxiliary files and their purpose.
 
-## 8. Cleanup
+## 9. Cleanup
 
 `docker compose -p cbl-connector-e2e-<MARK> -f deploy/docker-compose.yml --profile app down -v`
 at the end; `.runs/` is not committed; a repeated run must start from a clean stand.

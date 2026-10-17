@@ -139,6 +139,9 @@ func (w *Wire) handle(rw http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
+	case matchesRoute(w.fixtures.PayoutExecutionPath, r.Method, r.URL.Path):
+		rw.WriteHeader(http.StatusCreated)
+		_, _ = rw.Write(w.fixtures.PayoutExecutionTemplate)
 	case matchesRoute(w.fixtures.PayoutPath, r.Method, r.URL.Path):
 		rw.WriteHeader(http.StatusCreated)
 		_, _ = rw.Write(w.fixtures.PayoutTemplate)

@@ -38,6 +38,7 @@ type e2ePayoutGateway struct {
 	provider    string
 	caps        domain.Capabilities
 	createCalls int
+	refundCalls int
 }
 
 func (g *e2ePayoutGateway) CreateInvoice(context.Context, domain.CreateInvoiceRequest) (domain.Invoice, error) {
@@ -63,6 +64,15 @@ func (g *e2ePayoutGateway) GetPayout(context.Context, string) (domain.PayoutStat
 		return domain.PayoutStatus{}, err
 	}
 	return domain.PayoutStatus{State: domain.PayoutConfirmed, TXID: "tx-e2e-1", Fee: fee}, nil
+}
+
+func (g *e2ePayoutGateway) CreateRefund(context.Context, domain.RefundRequest) (domain.Refund, error) {
+	g.refundCalls++
+	return domain.Refund{GatewayRefundID: "rf-e2e-1", Provider: g.provider}, nil
+}
+
+func (g *e2ePayoutGateway) GetRefund(context.Context, string) (domain.PayoutStatus, error) {
+	return domain.PayoutStatus{State: domain.PayoutConfirmed, TXID: "rf-tx-1"}, nil
 }
 
 func (g *e2ePayoutGateway) Capabilities() domain.Capabilities { return g.caps }
@@ -153,6 +163,7 @@ func TestE2EPayoutPipeline(t *testing.T) {
 	require.NoError(t, err)
 
 	repo := storage.NewProviderPayoutsRepository(db)
+	invoiceRepo := storage.NewProviderInvoicesRepository(db)
 	publisher, err := kafkapub.New(brokers)
 	require.NoError(t, err)
 	defer publisher.Close()
@@ -162,7 +173,8 @@ func TestE2EPayoutPipeline(t *testing.T) {
 
 	group := "cbl-connector-payouts-e2e"
 	processor := inbox.NewProcessor(group, db, inbox.NewGuard(),
-		usecase.NewPayoutProcessor(router, repo, outbox.NewStore(), zap.NewNop()),
+		usecase.NewPayoutProcessor(router, repo, outbox.NewStore(), zap.NewNop(),
+			usecase.WithRefundMapping(invoiceRepo)),
 		publisher, inbox.NewRouter(usecase.TopicPayoutCommands, 3), zap.NewNop())
 	topics := []string{
 		usecase.TopicPayoutCommands,
@@ -229,4 +241,85 @@ func TestE2EPayoutPipeline(t *testing.T) {
 
 	// No third event: the replay publishes nothing.
 	assert.Nil(t, pollMaybe(t, consumer, 2*time.Second), "the replay must not publish an event")
+
+	// A refund command goes through the provider refunds API of the original
+	// provider and is resolved through GetRefund (17.12).
+	const refundSourceID = "01a14f70-0000-7000-8000-000000000502"
+	const refundPayoutID = "01a14f70-0000-7000-8000-000000000503"
+	_, _, err = invoiceRepo.Save(ctx, domain.ProviderInvoice{
+		Provider: "coingate", GatewayID: "inv-e2e", PaymentID: refundSourceID,
+		OrderID: refundSourceID, RequestHash: "hash-refund",
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	refundCommand := &eventsv1.PayoutCommand{
+		PayoutId:        refundPayoutID,
+		Amount:          &commonv1.Money{MinorUnits: 50_000, Asset: "USDT", Decimals: 2},
+		Network:         "trc20",
+		Address:         "TXyzAddress0123456789",
+		IdempotencyKey:  "payout:" + refundPayoutID + ":command",
+		RefundInvoiceId: refundSourceID,
+	}
+	refundBody, err := proto.Marshal(refundCommand)
+	require.NoError(t, err)
+	require.NoError(t, producer.ProduceSync(ctx, &kgo.Record{
+		Topic: usecase.TopicPayoutCommands,
+		Key:   []byte(refundPayoutID),
+		Value: refundBody,
+		Headers: []kgo.RecordHeader{
+			{Key: outbox.HeaderEventID, Value: []byte(uuid.Must(uuid.NewV7()).String())},
+		},
+	}).FirstErr())
+
+	refundSubmitted := pollMaybe(t, consumer, 30*time.Second)
+	require.NotNil(t, refundSubmitted, "the refund submitted event must reach gateway.payout.events")
+	require.NoError(t, proto.Unmarshal(refundSubmitted.Value, &event))
+	assert.Equal(t, eventsv1.GatewayPayoutEventType_GATEWAY_PAYOUT_EVENT_TYPE_SUBMITTED, event.GetType())
+	assert.Equal(t, "rf-e2e-1", event.GetGatewayPayoutId())
+	assert.Equal(t, "coingate", event.GetProvider())
+	assert.Equal(t, 1, gateway.refundCalls)
+	assert.Equal(t, 1, gateway.createCalls, "a refund never reaches the payout API")
+
+	time.Sleep(1100 * time.Millisecond)
+	resolved, err = worker.Sweep(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, resolved)
+	refundConfirmed := pollMaybe(t, consumer, 30*time.Second)
+	require.NotNil(t, refundConfirmed, "the refund confirmed event must reach gateway.payout.events")
+	require.NoError(t, proto.Unmarshal(refundConfirmed.Value, &event))
+	assert.Equal(t, eventsv1.GatewayPayoutEventType_GATEWAY_PAYOUT_EVENT_TYPE_CONFIRMED, event.GetType())
+	assert.Equal(t, "rf-tx-1", event.GetTxid())
+
+	var refundRow storage.ProviderPayoutRow
+	require.NoError(t, db.Where("payout_id = ?", refundPayoutID).First(&refundRow).Error)
+	require.NotNil(t, refundRow.RefundInvoiceID)
+	assert.Equal(t, refundSourceID, *refundRow.RefundInvoiceID)
+
+	// A replay of the refund command calls no provider and publishes nothing.
+	replayRefund := &eventsv1.PayoutCommand{
+		PayoutId:        refundPayoutID,
+		Amount:          &commonv1.Money{MinorUnits: 50_000, Asset: "USDT", Decimals: 2},
+		Network:         "trc20",
+		Address:         "TXyzAddress0123456789",
+		IdempotencyKey:  "payout:" + refundPayoutID + ":command",
+		RefundInvoiceId: refundSourceID,
+	}
+	replayBody, err := proto.Marshal(replayRefund)
+	require.NoError(t, err)
+	require.NoError(t, producer.ProduceSync(ctx, &kgo.Record{
+		Topic: usecase.TopicPayoutCommands,
+		Key:   []byte(refundPayoutID),
+		Value: replayBody,
+		Headers: []kgo.RecordHeader{
+			{Key: outbox.HeaderEventID, Value: []byte(uuid.Must(uuid.NewV7()).String())},
+		},
+	}).FirstErr())
+	require.Eventually(t, func() bool {
+		var count int64
+		require.NoError(t, db.Model(&inbox.Record{}).Where("consumer = ?", group).Count(&count).Error)
+		return count == 4
+	}, 20*time.Second, 200*time.Millisecond, "the refund replay must reach the inbox")
+	assert.Equal(t, 1, gateway.refundCalls, "the recorded refund never reaches the provider again")
+	assert.Nil(t, pollMaybe(t, consumer, 2*time.Second), "the refund replay must not publish an event")
 }

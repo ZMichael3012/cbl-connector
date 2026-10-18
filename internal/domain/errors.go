@@ -24,6 +24,9 @@ var (
 	ErrRejected = errors.New("connector: provider rejected the request")
 	// ErrProviderOverloaded reports exhaustion of the provider bulkhead.
 	ErrProviderOverloaded = errors.New("connector: provider overloaded")
+	// ErrRefundsUnsupported reports a provider without a refunds API: the
+	// refund stays on the manual path (17.12, decision 8).
+	ErrRefundsUnsupported = errors.New("connector: provider does not support refunds")
 	// ErrInvalidGatewayRequest reports an invalid gateway request (caller bug).
 	ErrInvalidGatewayRequest = errors.New("connector: invalid gateway request")
 	// ErrInvalidAdminInput reports an invalid administrative input (CBL-12.2).

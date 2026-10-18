@@ -341,6 +341,10 @@ type LookupGateway interface {
 type RefundRequest struct {
 	// IdempotencyKey sets the call idempotency key.
 	IdempotencyKey string
+	// PayoutID sets the platform payout (refund) id: providers with an
+	// idempotency reference receive it so a retry or a crash between the call
+	// and the commit cannot create a second refund (17.12).
+	PayoutID string
 	// RefundInvoiceID sets the platform refund reference.
 	RefundInvoiceID string
 	// PaymentID sets the platform payment being refunded.
@@ -368,6 +372,14 @@ type Refund struct {
 type Refunder interface {
 	// CreateRefund creates a refund in the external gateway.
 	CreateRefund(ctx context.Context, req RefundRequest) (Refund, error)
+}
+
+// RefundStatusGateway is the optional SPI v1 interface of providers whose
+// refunds are polled: GetRefund returns the canonical status of a provider
+// refund (17.12). Providers without it keep refunds on the manual path.
+type RefundStatusGateway interface {
+	// GetRefund returns the canonical status of the provider refund.
+	GetRefund(ctx context.Context, gatewayRefundID string) (PayoutStatus, error)
 }
 
 // ProviderInvoice maps a platform payment to the provider invoice: real

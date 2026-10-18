@@ -336,10 +336,25 @@ func (r *Resilient) CreateRefund(ctx context.Context, req domain.RefundRequest) 
 	}
 	inner, ok := r.inner.(domain.Refunder)
 	if !ok {
-		return domain.Refund{}, fmt.Errorf("%w: refunds are not supported", domain.ErrRejected)
+		return domain.Refund{}, fmt.Errorf("%w: refunds are not supported", domain.ErrRefundsUnsupported)
 	}
 	return call(r, ctx, "CreateRefund", attemptTimeoutPayout, func(attemptCtx context.Context) (domain.Refund, error) {
 		return inner.CreateRefund(attemptCtx, req)
+	})
+}
+
+// GetRefund forwards the optional refund status capability through the
+// resilience pipeline (17.12).
+func (r *Resilient) GetRefund(ctx context.Context, gatewayRefundID string) (domain.PayoutStatus, error) {
+	if strings.TrimSpace(gatewayRefundID) == "" {
+		return domain.PayoutStatus{}, fmt.Errorf("%w: GetRefund: empty refund id", domain.ErrInvalidGatewayRequest)
+	}
+	inner, ok := r.inner.(domain.RefundStatusGateway)
+	if !ok {
+		return domain.PayoutStatus{}, fmt.Errorf("%w: refunds are not supported", domain.ErrRefundsUnsupported)
+	}
+	return call(r, ctx, "GetRefund", attemptTimeoutPayoutStatus, func(attemptCtx context.Context) (domain.PayoutStatus, error) {
+		return inner.GetRefund(attemptCtx, gatewayRefundID)
 	})
 }
 

@@ -351,11 +351,23 @@ func (a *Adapter) CreateRefund(ctx context.Context, req domain.RefundRequest) (d
 	if strings.TrimSpace(req.Address) == "" {
 		return domain.Refund{}, fmt.Errorf("%w: refund destination is required", domain.ErrRejected)
 	}
-	payoutID, err := a.createPayout(ctx, "refund-"+req.RefundInvoiceID, req.Amount, req.Address)
+	payoutName := "refund-" + req.RefundInvoiceID
+	if payoutID := strings.TrimSpace(req.PayoutID); payoutID != "" {
+		// The per-command name is the dedupe reference: a retry must not create
+		// a second refund (17.12).
+		payoutName = "refund-" + payoutID
+	}
+	payoutID, err := a.createPayout(ctx, payoutName, req.Amount, req.Address)
 	if err != nil {
 		return domain.Refund{}, err
 	}
 	return domain.Refund{GatewayRefundID: payoutID, Provider: "btcpay", Amount: req.Amount}, nil
+}
+
+// GetRefund reads the refund state: a refund is a store payout created through
+// a pull payment, so the payout read serves it (17.12).
+func (a *Adapter) GetRefund(ctx context.Context, gatewayRefundID string) (domain.PayoutStatus, error) {
+	return a.GetPayout(ctx, gatewayRefundID)
 }
 
 // createPayout performs the two provider calls and returns the payout id.

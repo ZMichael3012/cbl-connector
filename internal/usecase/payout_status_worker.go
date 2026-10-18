@@ -124,8 +124,25 @@ func (w *PayoutStatusWorker) Sweep(ctx context.Context) (int, error) {
 			w.touch(ctx, row.PayoutID, now)
 			continue
 		}
-		status, err := gateway.GetPayout(ctx, *row.GatewayPayoutID)
+		// A refund row polls the provider refunds API when the adapter
+		// implements it; otherwise the row stays on the manual path (17.12).
+		readStatus := gateway.GetPayout
+		if row.RefundInvoiceID != nil && strings.TrimSpace(*row.RefundInvoiceID) != "" {
+			refundGateway, refundOK := gateway.(domain.RefundStatusGateway)
+			if !refundOK {
+				w.touch(ctx, row.PayoutID, now)
+				continue
+			}
+			readStatus = refundGateway.GetRefund
+		}
+		status, err := readStatus(ctx, *row.GatewayPayoutID)
 		if err != nil {
+			if errors.Is(err, domain.ErrRefundsUnsupported) {
+				// A provider without a refunds API keeps the row on the manual
+				// path without WARN noise on every sweep (17.12).
+				w.touch(ctx, row.PayoutID, now)
+				continue
+			}
 			if errors.Is(err, domain.ErrGatewayNotFound) {
 				if w.resolve(ctx, row, "failed", storage.ProviderPayoutPatch{Reason: stringPtr("gateway payout not found")}) {
 					resolved++

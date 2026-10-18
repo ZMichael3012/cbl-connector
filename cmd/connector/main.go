@@ -363,7 +363,8 @@ func main() {
 			log.Warn("payout pipeline disabled", zap.Error(payoutErr))
 		} else {
 			payoutRepo := storage.NewProviderPayoutsRepository(db)
-			payoutProcessor := usecase.NewPayoutProcessor(payoutRouter, payoutRepo, outbox.NewStore(), log)
+			payoutProcessor := usecase.NewPayoutProcessor(payoutRouter, payoutRepo, outbox.NewStore(), log,
+				usecase.WithRefundMapping(invoiceMapping))
 			payoutGroup := getenv("CONNECTOR_PAYOUT_CONSUMER_GROUP", usecase.ConsumerGroupPayouts)
 			payoutInbox := inbox.NewProcessor(payoutGroup, db, inbox.NewGuard(), payoutProcessor, publisher,
 				inbox.NewRouter(usecase.TopicPayoutCommands, 3), log)

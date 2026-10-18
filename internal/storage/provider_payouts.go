@@ -33,6 +33,8 @@ type ProviderPayoutRow struct {
 	Network string `gorm:"column:network"`
 	// AddressHash sets the sha256 of the destination address (no PII at rest).
 	AddressHash string `gorm:"column:address_hash"`
+	// RefundInvoiceID sets the source payment of a refund (17.12); NULL for a payout.
+	RefundInvoiceID *string `gorm:"column:refund_invoice_id"`
 	// TxID sets the provider transaction hash after confirmation.
 	TxID *string `gorm:"column:txid"`
 	// FeeMinor sets the provider fee in minor units.

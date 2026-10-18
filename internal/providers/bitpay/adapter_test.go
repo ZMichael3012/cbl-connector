@@ -769,6 +769,7 @@ func TestCreateRefundProvisionalShape(t *testing.T) {
 	require.NoError(t, err)
 	refund, err := adapter.CreateRefund(context.Background(), domain.RefundRequest{
 		IdempotencyKey:  "k-1",
+		PayoutID:        "po-77",
 		RefundInvoiceID: "refund-1",
 		PaymentID:       "order-1",
 		GatewayID:       "bp-gw-1",
@@ -791,7 +792,7 @@ func TestCreateRefundProvisionalShape(t *testing.T) {
 	assert.Equal(t, "bp-gw-1", sent.InvoiceID)
 	assert.Equal(t, "5000000", sent.Amount.String())
 	assert.Equal(t, "USDT", sent.Curr)
-	assert.Equal(t, "refund-1", sent.Ref)
+	assert.Equal(t, "po-77", sent.Ref, "the per-command reference carries the payout id (17.12)")
 	assert.Equal(t, "MOCKADDR", sent.Address)
 
 	before := calls

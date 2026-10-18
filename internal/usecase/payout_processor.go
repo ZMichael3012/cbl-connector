@@ -62,6 +62,13 @@ type PayoutStore interface {
 	InsertSubmittedTx(ctx context.Context, tx *gorm.DB, row storage.ProviderPayoutRow) (bool, error)
 }
 
+// RefundInvoiceMapping resolves the provider invoice of the original payment
+// of a refund; the provider_invoices repository implements it (17.12).
+type RefundInvoiceMapping interface {
+	// ByPaymentID returns the mapping of the platform payment.
+	ByPaymentID(ctx context.Context, paymentID string) (domain.ProviderInvoice, error)
+}
+
 // OutboxAppender writes event envelopes into the transactional outbox.
 type OutboxAppender interface {
 	// Append writes the envelope in the given transaction.
@@ -104,6 +111,16 @@ func NewPayoutRouter(gateways map[string]domain.PaymentGateway, allowed map[stri
 		ordered = append(ordered, payoutProvider{id: id, gateway: gateway})
 	}
 	return &PayoutRouter{ordered: ordered}, nil
+}
+
+// Gateway returns the wrapped gateway of an enabled provider.
+func (r *PayoutRouter) Gateway(provider string) (domain.PaymentGateway, bool) {
+	for _, item := range r.ordered {
+		if strings.EqualFold(item.id, provider) {
+			return item.gateway, true
+		}
+	}
+	return nil, false
 }
 
 // SelectPayout returns the first enabled provider whose capabilities cover the
@@ -151,15 +168,26 @@ func payoutCapability(gateway domain.PaymentGateway, req domain.PayoutRequest) (
 // a business rejection publishes a failed event, a temporary failure is retried
 // through the retry topics (17.11).
 type PayoutProcessor struct {
-	router *PayoutRouter
-	store  PayoutStore
-	outbox OutboxAppender
-	log    *zap.Logger
-	clock  func() time.Time
+	router        *PayoutRouter
+	store         PayoutStore
+	outbox        OutboxAppender
+	refundMapping RefundInvoiceMapping
+	log           *zap.Logger
+	clock         func() time.Time
 }
 
 // PayoutOption configures the PayoutProcessor.
 type PayoutOption func(*PayoutProcessor)
+
+// WithRefundMapping sets the mapping used to resolve the original provider
+// invoice of a refund command (17.12).
+func WithRefundMapping(mapping RefundInvoiceMapping) PayoutOption {
+	return func(p *PayoutProcessor) {
+		if mapping != nil {
+			p.refundMapping = mapping
+		}
+	}
+}
 
 // WithPayoutClock sets the time source used by the events; tests use it.
 func WithPayoutClock(clock func() time.Time) PayoutOption {
@@ -201,6 +229,10 @@ func (p *PayoutProcessor) Handle(ctx context.Context, tx *gorm.DB, msg inbox.Mes
 	if err := p.store.LockPayoutTx(ctx, tx, payoutID); err != nil {
 		return err
 	}
+	refundInvoiceID, refundErr := validateRefundMarker(command.GetRefundInvoiceId())
+	if refundErr != nil {
+		return refundErr
+	}
 
 	recorded, err := p.store.Get(ctx, payoutID)
 	switch {
@@ -212,6 +244,9 @@ func (p *PayoutProcessor) Handle(ctx context.Context, tx *gorm.DB, msg inbox.Mes
 		return nil
 	case !errors.Is(err, storage.ErrProviderPayoutNotFound):
 		return fmt.Errorf("usecase: payout mapping of %s: %w", payoutID, err)
+	}
+	if refundInvoiceID != "" {
+		return p.handleRefund(ctx, tx, payoutID, refundInvoiceID, request, msg)
 	}
 
 	gateway, provider, err := p.router.SelectPayout(ctx, request)
@@ -285,6 +320,136 @@ func (p *PayoutProcessor) Handle(ctx context.Context, tx *gorm.DB, msg inbox.Mes
 		zap.String("payout_id", payoutID),
 		zap.String("provider", provider),
 		zap.String("gateway_payout_id", gatewayPayoutID))
+	return nil
+}
+
+// validateRefundMarker canonicalizes the optional refund marker of a command:
+// a non-empty value is the platform payment id being refunded (cf-4.2).
+func validateRefundMarker(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", nil
+	}
+	parsed, err := uuid.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("%w: refund_invoice_id", errInvalidPayoutCommand)
+	}
+	return parsed.String(), nil
+}
+
+// handleRefund processes a refund command: the provider comes from the original
+// invoice mapping (the provider that accepted the payment), the adapter refunds
+// API is called and the mapping records the refund marker (17.12).
+func (p *PayoutProcessor) handleRefund(ctx context.Context, tx *gorm.DB, payoutID, refundInvoiceID string, request domain.PayoutRequest, msg inbox.Message) error {
+	if p.refundMapping == nil {
+		return fmt.Errorf("usecase: refund mapping is not configured for payout %s", payoutID)
+	}
+	invoice, err := p.refundMapping.ByPaymentID(ctx, refundInvoiceID)
+	if err != nil {
+		switch {
+		case errors.Is(err, storage.ErrProviderInvoiceNotFound):
+			p.log.Warn("refund invoice has no provider mapping",
+				zap.String("payout_id", payoutID),
+				zap.String("refund_invoice_id", refundInvoiceID))
+			return p.publishFailed(ctx, tx, payoutID, "", "refund invoice has no provider mapping", msg.Headers)
+		case errors.Is(err, storage.ErrProviderInvoiceAmbiguous):
+			p.log.Warn("refund invoice has multiple provider mappings",
+				zap.String("payout_id", payoutID),
+				zap.String("refund_invoice_id", refundInvoiceID))
+			return p.publishFailed(ctx, tx, payoutID, "", "refund invoice has multiple provider mappings", msg.Headers)
+		default:
+			return fmt.Errorf("usecase: refund mapping of %s: %w", payoutID, err)
+		}
+	}
+	provider := strings.ToLower(strings.TrimSpace(invoice.Provider))
+	gateway, enabled := p.router.Gateway(provider)
+	if !enabled {
+		p.log.Warn("refund provider is not enabled",
+			zap.String("payout_id", payoutID),
+			zap.String("provider", provider))
+		return p.publishFailed(ctx, tx, payoutID, provider, "provider refunds are not enabled", msg.Headers)
+	}
+	refunder, ok := gateway.(domain.Refunder)
+	if !ok {
+		p.log.Warn("refund provider does not support refunds",
+			zap.String("payout_id", payoutID),
+			zap.String("provider", provider))
+		return p.publishFailed(ctx, tx, payoutID, provider, "provider does not support refunds", msg.Headers)
+	}
+	refund, err := refunder.CreateRefund(ctx, domain.RefundRequest{
+		IdempotencyKey:  request.IdempotencyKey,
+		PayoutID:        payoutID,
+		RefundInvoiceID: refundInvoiceID,
+		PaymentID:       refundInvoiceID,
+		GatewayID:       invoice.GatewayID,
+		Amount:          request.Amount,
+		Address:         request.Address,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrRefundsUnsupported):
+			p.log.Warn("refund provider does not support refunds",
+				zap.String("payout_id", payoutID),
+				zap.String("provider", provider))
+			return p.publishFailed(ctx, tx, payoutID, provider, "provider does not support refunds", msg.Headers)
+		case errors.Is(err, domain.ErrRejected), errors.Is(err, domain.ErrUnsupportedNetwork),
+			errors.Is(err, domain.ErrGatewayNotFound):
+			p.log.Warn("refund rejected by provider",
+				zap.String("payout_id", payoutID),
+				zap.String("provider", provider),
+				zap.Error(err))
+			return p.publishFailed(ctx, tx, payoutID, provider, "provider rejected the refund", msg.Headers)
+		default:
+			return fmt.Errorf("usecase: create refund %s at %s: %w", payoutID, provider, err)
+		}
+	}
+	gatewayRefundID := sanitizeIdentifier(refund.GatewayRefundID, 128)
+	if gatewayRefundID == "" {
+		return fmt.Errorf("usecase: provider %s returned no usable refund id for %s", provider, payoutID)
+	}
+	if refund.Provider != "" && !strings.EqualFold(refund.Provider, provider) {
+		return fmt.Errorf("usecase: provider %s returned a refund attributed to %s", provider, refund.Provider)
+	}
+	now := p.clock().UTC()
+	row := storage.ProviderPayoutRow{
+		PayoutID:        payoutID,
+		Provider:        provider,
+		GatewayPayoutID: &gatewayRefundID,
+		AmountMinor:     request.Amount.MinorUnits,
+		Asset:           request.Amount.Asset,
+		Decimals:        int(request.Amount.Decimals),
+		Network:         request.Network,
+		AddressHash:     addressHash(request.Address),
+		RefundInvoiceID: &refundInvoiceID,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	inserted, err := p.store.InsertSubmittedTx(ctx, tx, row)
+	if err != nil {
+		return err
+	}
+	if !inserted {
+		p.log.Info("refund already recorded by a concurrent delivery", zap.String("payout_id", payoutID))
+		return nil
+	}
+	event := &eventsv1.GatewayPayoutEvent{
+		PayoutId:        payoutID,
+		GatewayPayoutId: gatewayRefundID,
+		Type:            eventsv1.GatewayPayoutEventType_GATEWAY_PAYOUT_EVENT_TYPE_SUBMITTED,
+		Provider:        provider,
+	}
+	envelope, err := buildPayoutEnvelope("gateway.payout.submitted", event, msg.Headers, now)
+	if err != nil {
+		return err
+	}
+	if err := p.outbox.Append(ctx, tx, envelope); err != nil {
+		return fmt.Errorf("usecase: append refund submitted event: %w", err)
+	}
+	p.log.Info("refund submitted to provider",
+		zap.String("payout_id", payoutID),
+		zap.String("refund_invoice_id", refundInvoiceID),
+		zap.String("provider", provider),
+		zap.String("gateway_refund_id", gatewayRefundID))
 	return nil
 }
 

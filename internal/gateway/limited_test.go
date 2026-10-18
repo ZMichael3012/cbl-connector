@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cbl/cbl-kit/ratelimit"
@@ -154,4 +155,41 @@ func TestNewLimitedValidation(t *testing.T) {
 	require.ErrorIs(t, err, domain.ErrInvalidGatewayRequest)
 	_, err = gateway.NewLimited(&fakeGateway{}, &fakeLimiter{}, "  ")
 	require.ErrorIs(t, err, domain.ErrInvalidGatewayRequest)
+}
+
+// limitedRefundStatus adds the optional refund status interface to the fake.
+type limitedRefundStatus struct {
+	*fakeGateway
+	status domain.PayoutStatus
+}
+
+func (f *limitedRefundStatus) GetRefund(context.Context, string) (domain.PayoutStatus, error) {
+	return f.status, nil
+}
+
+func TestLimitedGetRefund(t *testing.T) {
+	t.Parallel()
+	limiter := &fakeLimiter{decision: ratelimit.Decision{Allowed: true}}
+	inner := &limitedRefundStatus{fakeGateway: &fakeGateway{}, status: domain.PayoutStatus{State: domain.PayoutConfirmed}}
+	limited, err := gateway.NewLimited(inner, limiter, "coingate")
+	require.NoError(t, err)
+
+	status, err := limited.GetRefund(context.Background(), "rf-1")
+	require.NoError(t, err)
+	assert.Equal(t, domain.PayoutConfirmed, status.State)
+	assert.Equal(t, []string{"coingate:status"}, limiter.keys)
+}
+
+func TestLimitedGetRefundUnsupported(t *testing.T) {
+	t.Parallel()
+	limited, _ := newLimited(t, &fakeLimiter{decision: ratelimit.Decision{Allowed: true}})
+	_, err := limited.GetRefund(context.Background(), "rf-1")
+	require.ErrorIs(t, err, domain.ErrRefundsUnsupported)
+}
+
+func TestLimitedCreateRefundUnsupported(t *testing.T) {
+	t.Parallel()
+	limited, _ := newLimited(t, &fakeLimiter{decision: ratelimit.Decision{Allowed: true}})
+	_, err := limited.CreateRefund(context.Background(), domain.RefundRequest{IdempotencyKey: "k"})
+	require.ErrorIs(t, err, domain.ErrRefundsUnsupported)
 }

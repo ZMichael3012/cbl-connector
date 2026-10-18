@@ -570,7 +570,7 @@ func (a *Adapter) CreateRefund(ctx context.Context, req domain.RefundRequest) (d
 		"invoiceId": req.GatewayID,
 		"amount":    req.Amount.MinorUnits,
 		"currency":  strings.ToUpper(strings.TrimSpace(req.Amount.Asset)),
-		"reference": req.RefundInvoiceID,
+		"reference": referenceOf(req),
 	}
 	if address := strings.TrimSpace(req.Address); address != "" {
 		body["address"] = address
@@ -587,6 +587,51 @@ func (a *Adapter) CreateRefund(ctx context.Context, req domain.RefundRequest) (d
 		return domain.Refund{}, errors.New("bitpay: refund response has no id")
 	}
 	return domain.Refund{GatewayRefundID: decoded.ID, Provider: "bitpay", Amount: req.Amount}, nil
+}
+
+// refundStates maps provider refund statuses to canonical payout states (17.12,
+// provisional until the 17.16 sandbox run).
+var refundStates = map[string]domain.PayoutState{
+	"completed":  domain.PayoutConfirmed,
+	"success":    domain.PayoutConfirmed,
+	"refunded":   domain.PayoutConfirmed,
+	"pending":    domain.PayoutSubmitted,
+	"processing": domain.PayoutSubmitted,
+	"created":    domain.PayoutSubmitted,
+	"failed":     domain.PayoutFailed,
+	"failure":    domain.PayoutFailed,
+	"canceled":   domain.PayoutFailed,
+	"rejected":   domain.PayoutFailed,
+}
+
+// GetRefund reads the refund state (17.12); an unknown status fails closed.
+func (a *Adapter) GetRefund(ctx context.Context, gatewayRefundID string) (domain.PayoutStatus, error) {
+	if strings.TrimSpace(gatewayRefundID) == "" {
+		return domain.PayoutStatus{}, fmt.Errorf("%w: refund id is required", domain.ErrRejected)
+	}
+	payload, err := a.request(ctx, http.MethodGet, "/refunds/"+url.PathEscape(gatewayRefundID), nil, domain.ErrGatewayNotFound)
+	if err != nil {
+		return domain.PayoutStatus{}, err
+	}
+	var decoded refundResponse
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		return domain.PayoutStatus{}, fmt.Errorf("bitpay: decode refund status: %w", err)
+	}
+	state, ok := refundStates[strings.ToLower(strings.TrimSpace(decoded.Status))]
+	if !ok {
+		return domain.PayoutStatus{}, fmt.Errorf("%w: refund state %q", domain.ErrUnknownState, truncateText([]byte(decoded.Status)))
+	}
+	return domain.PayoutStatus{State: state}, nil
+}
+
+// referenceOf returns the per-command reference of a refund: the payout id is
+// unique per refund command, so a retry or a redelivery cannot create a second
+// refund (17.12); the source invoice is only a fallback for legacy callers.
+func referenceOf(req domain.RefundRequest) string {
+	if payoutID := strings.TrimSpace(req.PayoutID); payoutID != "" {
+		return payoutID
+	}
+	return req.RefundInvoiceID
 }
 
 // parseAmountLiteral parses a decimal major-unit JSON number at the configured

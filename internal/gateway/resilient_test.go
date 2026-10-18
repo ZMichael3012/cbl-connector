@@ -710,7 +710,7 @@ func TestResilientMissingOptionalCapabilityRejected(t *testing.T) {
 	require.ErrorIs(t, err, domain.ErrRejected, "lookup without the capability is a business rejection")
 
 	_, err = resilient.CreateRefund(context.Background(), domain.RefundRequest{IdempotencyKey: "k-1"})
-	require.ErrorIs(t, err, domain.ErrRejected, "refund without the capability is a business rejection")
+	require.ErrorIs(t, err, domain.ErrRefundsUnsupported, "refund without the capability reports the refund sentinel (17.12)")
 }
 
 func TestResilientBreakerIgnoresGatewayNotFound(t *testing.T) {
@@ -769,4 +769,31 @@ func (bareGateway) GetPayout(context.Context, string) (domain.PayoutStatus, erro
 // Capabilities is a placeholder.
 func (bareGateway) Capabilities() domain.Capabilities {
 	return domain.Capabilities{Provider: "bare"}
+}
+
+// resilientRefundStatus adds the optional refund status interface to the fake.
+type resilientRefundStatus struct {
+	*fakeGateway
+	status domain.PayoutStatus
+}
+
+func (f *resilientRefundStatus) GetRefund(context.Context, string) (domain.PayoutStatus, error) {
+	return f.status, nil
+}
+
+func TestResilientGetRefund(t *testing.T) {
+	t.Parallel()
+	inner := &resilientRefundStatus{fakeGateway: &fakeGateway{}, status: domain.PayoutStatus{State: domain.PayoutConfirmed}}
+	resilient, _ := newTestResilient(t, inner, testConfig())
+
+	status, err := resilient.GetRefund(context.Background(), "rf-1")
+	require.NoError(t, err)
+	assert.Equal(t, domain.PayoutConfirmed, status.State)
+
+	_, err = resilient.GetRefund(context.Background(), " ")
+	require.ErrorIs(t, err, domain.ErrInvalidGatewayRequest)
+
+	plain, _ := newTestResilient(t, &fakeGateway{}, testConfig())
+	_, err = plain.GetRefund(context.Background(), "rf-1")
+	require.ErrorIs(t, err, domain.ErrRefundsUnsupported)
 }

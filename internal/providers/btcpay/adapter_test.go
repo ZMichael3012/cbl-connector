@@ -606,6 +606,7 @@ func TestCreateRefund(t *testing.T) {
 	require.NoError(t, err)
 	refund, err := adapter.CreateRefund(context.Background(), domain.RefundRequest{
 		IdempotencyKey:  "k-1",
+		PayoutID:        "po-77",
 		RefundInvoiceID: "refund-1",
 		PaymentID:       "order-1",
 		GatewayID:       "abcdef0123456789abcdef0123456789",
@@ -619,7 +620,7 @@ func TestCreateRefund(t *testing.T) {
 
 	var sent map[string]any
 	require.NoError(t, json.Unmarshal([]byte(pullBody), &sent))
-	assert.Equal(t, "refund-refund-1", sent["name"])
+	assert.Equal(t, "refund-po-77", sent["name"], "the per-command pull-payment name carries the payout id (17.12)")
 	require.NoError(t, json.Unmarshal([]byte(payoutBody), &sent))
 	assert.Equal(t, "bcrt1qrefund", sent["destination"])
 	assert.Equal(t, "BTC-CHAIN", sent["payoutMethodId"])

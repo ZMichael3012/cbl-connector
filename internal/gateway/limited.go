@@ -109,17 +109,32 @@ func (l *Limited) LookupByOrderID(ctx context.Context, orderID string) (domain.P
 	return lookup.LookupByOrderID(ctx, orderID)
 }
 
-// CreateRefund implements the optional SPI v1 interface: the wrapped gateway
-// reports ErrRejected when it has no refunds API (the manual path, decision 8).
+// CreateRefund implements the optional SPI v1 interface: a wrapped gateway
+// without a refunds API reports ErrRefundsUnsupported (the manual path,
+// decision 8, 17.12).
 func (l *Limited) CreateRefund(ctx context.Context, req domain.RefundRequest) (domain.Refund, error) {
 	refunder, ok := l.next.(domain.Refunder)
 	if !ok {
-		return domain.Refund{}, fmt.Errorf("%w: provider %q does not support refunds", domain.ErrRejected, l.key)
+		return domain.Refund{}, fmt.Errorf("%w: provider %q", domain.ErrRefundsUnsupported, l.key)
 	}
 	if err := l.guard(ctx, limitOperationRefund); err != nil {
 		return domain.Refund{}, err
 	}
 	return refunder.CreateRefund(ctx, req)
+}
+
+// GetRefund implements the optional refund status interface (17.12): it uses
+// the status bucket (a read) and requires the wrapped gateway to support
+// refunds.
+func (l *Limited) GetRefund(ctx context.Context, gatewayRefundID string) (domain.PayoutStatus, error) {
+	refundStatus, ok := l.next.(domain.RefundStatusGateway)
+	if !ok {
+		return domain.PayoutStatus{}, fmt.Errorf("%w: provider %q", domain.ErrRefundsUnsupported, l.key)
+	}
+	if err := l.guard(ctx, limitOperationStatus); err != nil {
+		return domain.PayoutStatus{}, err
+	}
+	return refundStatus.GetRefund(ctx, gatewayRefundID)
 }
 
 // Capabilities implements the port without a token: it is a local read.

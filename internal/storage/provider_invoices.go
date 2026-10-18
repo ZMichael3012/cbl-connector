@@ -17,6 +17,10 @@ import (
 // sentinel lives in the domain so the transport port can match it.
 var ErrProviderInvoiceNotFound = domain.ErrProviderInvoiceNotFound
 
+// ErrProviderInvoiceAmbiguous reports a payment with mappings at several
+// providers: the refund cannot pick the provider that took the money (17.12).
+var ErrProviderInvoiceAmbiguous = errors.New("storage: provider invoice mapping is ambiguous")
+
 // ProviderInvoicesRepository stores the payment to provider invoice mapping
 // (17.2): webhook normalization and timeout recovery resolve the platform
 // payment through it.
@@ -79,6 +83,31 @@ func (r *ProviderInvoicesRepository) Save(ctx context.Context, invoice domain.Pr
 // ByGatewayID resolves the mapping of a provider webhook by its gateway id.
 func (r *ProviderInvoicesRepository) ByGatewayID(ctx context.Context, provider, gatewayID string) (domain.ProviderInvoice, error) {
 	return r.byGatewayID(ctx, provider, gatewayID)
+}
+
+// ByPaymentID resolves the mapping of the original payment: a refund command
+// carries the platform payment id and the Connector must refund through the
+// provider that accepted that payment (17.12). A payment whose mappings span
+// several providers is ambiguous (the provider is not provable from here):
+// such a refund fails closed instead of picking the oldest invoice.
+func (r *ProviderInvoicesRepository) ByPaymentID(ctx context.Context, paymentID string) (domain.ProviderInvoice, error) {
+	var rows []ProviderInvoiceRow
+	err := r.db.WithContext(ctx).
+		Where("payment_id = ?", paymentID).
+		Order("created_at ASC, id ASC").
+		Limit(2).
+		Find(&rows).Error
+	if err != nil {
+		return domain.ProviderInvoice{}, fmt.Errorf("storage: load provider invoices by payment: %w", err)
+	}
+	switch len(rows) {
+	case 0:
+		return domain.ProviderInvoice{}, fmt.Errorf("%w: payment %q", ErrProviderInvoiceNotFound, paymentID)
+	case 1:
+		return rowToDomain(rows[0]), nil
+	default:
+		return domain.ProviderInvoice{}, fmt.Errorf("%w: payment %q", ErrProviderInvoiceAmbiguous, paymentID)
+	}
 }
 
 // ByOrderID resolves the mapping by the order reference sent to the provider;

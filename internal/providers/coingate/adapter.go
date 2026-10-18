@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,9 +61,10 @@ type Adapter struct {
 }
 
 var (
-	_ domain.PaymentGateway = (*Adapter)(nil)
-	_ domain.LookupGateway  = (*Adapter)(nil)
-	_ domain.Refunder       = (*Adapter)(nil)
+	_ domain.PaymentGateway  = (*Adapter)(nil)
+	_ domain.LookupGateway   = (*Adapter)(nil)
+	_ domain.Refunder        = (*Adapter)(nil)
+	_ domain.PaymentExporter = (*Adapter)(nil)
 )
 
 // New validates the configuration and builds the adapter.
@@ -256,6 +258,63 @@ func (a *Adapter) statusOf(gatewayID string, decoded orderResponse) (domain.Paym
 		Network:        network,
 		GatewayEventTS: eventTS,
 	}, nil
+}
+
+// ExportPayments returns one page of order records for reconciliation (17.13):
+// the walk is page-based and rows are mapped fail-soft so one odd row cannot
+// block the window.
+func (a *Adapter) ExportPayments(ctx context.Context, req domain.ExportRequest) (domain.ExportPage, error) {
+	offset, page, err := domain.ExportPageParams(req.Cursor, req.Limit)
+	if err != nil {
+		return domain.ExportPage{}, err
+	}
+	query := url.Values{}
+	query.Set("page", strconv.Itoa(page))
+	query.Set("per_page", strconv.Itoa(req.Limit))
+	query.Set("from", req.From.UTC().Format(time.RFC3339))
+	query.Set("to", req.To.UTC().Format(time.RFC3339))
+	payload, err := a.request(ctx, http.MethodGet, "/v2/orders?"+query.Encode(), nil, domain.ErrGatewayNotFound)
+	if err != nil {
+		return domain.ExportPage{}, err
+	}
+	rows, err := providerwire.DecodeEnvelopeOrArray[orderResponse](payload, "orders")
+	if err != nil {
+		return domain.ExportPage{}, fmt.Errorf("coingate: decode order export: %w", err)
+	}
+	payments := make([]domain.PaymentStatus, 0, len(rows))
+	for _, row := range rows {
+		payments = append(payments, a.exportStatusOf(row))
+	}
+	return domain.ExportPage{
+		Payments:   payments,
+		NextCursor: domain.ExportNextCursor(offset, len(payments), req.Limit),
+	}, nil
+}
+
+// exportStatusOf maps an order body fail-soft (17.13): an unknown status word
+// leaves the canonical state empty and an unparsable amount stays zero.
+func (a *Adapter) exportStatusOf(decoded orderResponse) domain.PaymentStatus {
+	status := domain.PaymentStatus{
+		GatewayID: decoded.ID.String(),
+		PaymentID: decoded.OrderID,
+		Provider:  "coingate",
+		State:     orderStates[decoded.Status],
+		RawStatus: decoded.Status,
+	}
+	if decoded.CreatedAt != "" {
+		if parsed, err := time.Parse(time.RFC3339, decoded.CreatedAt); err == nil {
+			status.GatewayEventTS = parsed.UTC()
+		}
+	}
+	if decoded.PayAmount != "" && decoded.PayCurrency != "" {
+		if parsed, err := a.parseAmount(decoded.PayAmount, payAsset(decoded.PayCurrency)); err == nil {
+			status.ReceivedAmount = parsed
+		}
+	}
+	if decoded.PayCurrency != "" {
+		status.Network = strings.ToLower(strings.TrimSpace(decoded.PayCurrency))
+	}
+	return status
 }
 
 // orderStates maps CoinGate order statuses to canonical states.

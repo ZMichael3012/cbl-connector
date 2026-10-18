@@ -37,3 +37,33 @@ func DecodeArrayOrObject[T any](payload []byte, notFound error) (T, error) {
 	}
 	return single, nil
 }
+
+// DecodeEnvelopeOrArray decodes a provider list body that may be a bare JSON
+// array or an envelope object holding the rows under the given key (for
+// example "data" or "orders"); the reconciliation exports of the adapters
+// share it (17.13).
+func DecodeEnvelopeOrArray[T any](payload []byte, key string) ([]T, error) {
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		var rows []T
+		if err := json.Unmarshal(trimmed, &rows); err != nil {
+			return nil, fmt.Errorf("providers/wire: decode list: %w", err)
+		}
+		return rows, nil
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &envelope); err != nil {
+		return nil, fmt.Errorf("providers/wire: decode list envelope: %w", err)
+	}
+	raw, ok := envelope[key]
+	if !ok {
+		// A missing envelope key is a shape violation, not an empty page:
+		// silently answering "no operations" would hide provider API drift.
+		return nil, fmt.Errorf("providers/wire: list envelope has no %q key", key)
+	}
+	var rows []T
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, fmt.Errorf("providers/wire: decode list rows: %w", err)
+	}
+	return rows, nil
+}

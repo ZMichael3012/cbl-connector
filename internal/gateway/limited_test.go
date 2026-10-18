@@ -49,6 +49,11 @@ func (f *fakeGateway) Capabilities() domain.Capabilities {
 	return domain.Capabilities{Provider: "coingate"}
 }
 
+func (f *fakeGateway) ExportPayments(_ context.Context, _ domain.ExportRequest) (domain.ExportPage, error) {
+	f.calls = append(f.calls, "export_payments")
+	return domain.ExportPage{Payments: []domain.PaymentStatus{{GatewayID: "gw-1", State: domain.StateDetected}}}, nil
+}
+
 type fakeLimiter struct {
 	decision ratelimit.Decision
 	err      error
@@ -192,4 +197,40 @@ func TestLimitedCreateRefundUnsupported(t *testing.T) {
 	limited, _ := newLimited(t, &fakeLimiter{decision: ratelimit.Decision{Allowed: true}})
 	_, err := limited.CreateRefund(context.Background(), domain.RefundRequest{IdempotencyKey: "k"})
 	require.ErrorIs(t, err, domain.ErrRefundsUnsupported)
+}
+
+// noExporterGateway presents the port without the optional PaymentExporter
+// capability: embedding the interface hides the fake export method.
+type noExporterGateway struct{ domain.PaymentGateway }
+
+func TestLimitedExportPaymentsUsesStatusBucket(t *testing.T) {
+	t.Parallel()
+	limiter := &fakeLimiter{decision: ratelimit.Decision{Allowed: true, Remaining: 5}}
+	limited, next := newLimited(t, limiter)
+
+	page, err := limited.ExportPayments(context.Background(), domain.ExportRequest{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, page.Payments, 1)
+	assert.Contains(t, next.calls, "export_payments")
+	assert.Equal(t, []string{"coingate:status"}, limiter.keys, "the export is throttled by the status bucket")
+}
+
+func TestLimitedExportPaymentsWithoutCapability(t *testing.T) {
+	t.Parallel()
+	next := &noExporterGateway{PaymentGateway: &fakeGateway{}}
+	limited, err := gateway.NewLimited(next, &fakeLimiter{decision: ratelimit.Decision{Allowed: true}}, "coingate")
+	require.NoError(t, err)
+
+	_, err = limited.ExportPayments(context.Background(), domain.ExportRequest{})
+	require.ErrorIs(t, err, domain.ErrRejected)
+}
+
+func TestLimitedExportPaymentsDenied(t *testing.T) {
+	t.Parallel()
+	limiter := &fakeLimiter{decision: ratelimit.Decision{Allowed: false, RetryAfter: time.Second}}
+	limited, next := newLimited(t, limiter)
+
+	_, err := limited.ExportPayments(context.Background(), domain.ExportRequest{Limit: 5})
+	require.ErrorIs(t, err, domain.ErrProviderOverloaded)
+	assert.NotContains(t, next.calls, "export_payments", "a denied token must not reach the provider")
 }

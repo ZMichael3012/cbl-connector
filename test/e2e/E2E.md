@@ -25,6 +25,7 @@ scenario with poison-pill cases runs separately on testcontainers (`make test-e2
 | `E2E_Connector_NowPaymentsProfile` | compose stand with the mock-gateway `nowpayments` profile selected: `CreateInvoice` answers the invoice id, provider `nowpayments` and a checkout URL; the read answers detected/`waiting`; the mock simulate advances; the read answers confirmed/`finished` | the NOWPayments adapter against the CBL-17.5 profile wire contract (cross-service) |
 | `E2E_Connector_BitPayProfile` | compose stand with the mock-gateway `bitpay` profile selected: `CreateInvoice` (ECDSA-signed) answers the invoice id, provider `bitpay` and a checkout URL; the read answers detected/`new`; the mock simulate advances; the read answers confirmed/`complete` | the BitPay adapter against the CBL-17.5 profile wire contract (cross-service) |
 | `E2E_Connector_PayoutPipeline` | testcontainers Kafka/PostgreSQL: a `payout.commands` command produces a `gateway.payout.events` submitted event with the provider and the provider payout id; the status worker resolves a confirmed verdict exactly once; a replay (new event id) calls no provider and publishes nothing; a refund command (cf-4.2 marker) goes through `CreateRefund` of the original provider and is resolved through `GetRefund`, with the refund marker recorded in the mapping | the payout and refund pipelines (CBL-17.11, CBL-17.12) |
+| `E2E_Connector_Export` | planned (17.16 harness / mock list endpoints): `ListGatewayPayments` twice per provider continuing an opaque cursor, rows carry `payment_id`, canonical status and `raw_status`, a fixture unknown-status row arrives as `UNSPECIFIED`, a window with no operations answers an empty page; locally the wire shapes are pinned by the adapter export unit suites (KI-connector-13) | the CBL-17.13 export (`ListGatewayPayments`, frozen at CF-1) |
 
 The consumer and payout-pipeline scenarios run on testcontainers (`make test-e2e`:
 `test/e2e/normalizer_kafka_test.go`, `test/e2e/payout_pipeline_kafka_test.go`);
@@ -206,10 +207,28 @@ the refund wire shapes.
    (`payoutMethods:["BTC"]`) and a payout against it (`payoutMethodId`
    `BTC-CHAIN`); the payout answers `AwaitingApproval` (the approval flow is
    17.11).
-9. Artifacts as in section 10 plus the setup and webhook transcripts; stop the
+9. Artifacts as in section 11 plus the setup and webhook transcripts; stop the
    stand with `down -v`.
 
-## 10. Mandatory run artifacts
+## 10. E2E_Connector_Export (planned, 17.16)
+
+The export scenario needs either the 17.16 sandbox harness or mock-gateway list
+endpoints for the provider profiles; until then the adapter wire shapes are
+pinned by the export unit suites (`internal/providers/*/export_test.go`) and the
+transport rows. The procedure to run once the harness lands:
+
+1. Common run order, steps 1-4 with a provider profile selected.
+2. `ListGatewayPayments` (grpcurl:
+   `-d '{"provider":"<id>","from":"<RFC3339>","to":"<RFC3339>","limit":2}'`)
+   -> a page of rows with `payment_id`, `status`, `raw_status` and, on a full
+   page, `next_cursor`.
+3. Repeat with the returned `next_cursor` -> the walk continues (or answers an
+   empty page), proving cursor continuity end to end.
+4. Assert a fixture unknown-status row arrives as `UNSPECIFIED` with the raw
+   word, and a window without operations answers an empty page.
+5. Artifacts as in section 11; stop the stand with `down -v`.
+
+## 11. Mandatory run artifacts
 
 - `summary.md` (template `.additionals/summary.template.md`; PASS/FAIL verdict, steps,
   key values, artifact list, time);
@@ -218,12 +237,12 @@ the refund wire shapes.
 - `smoke.log` (curl transcripts) and `smoke-checks.txt`;
 - on failure: container states and the connector log fragments around the failure.
 
-## 11. Auxiliary files (.additionals)
+## 12. Auxiliary files (.additionals)
 
 - `summary.template.md` - the `summary.md` template;
 - `inventory.md` - the list of auxiliary files and their purpose.
 
-## 12. Cleanup
+## 13. Cleanup
 
 `docker compose -p cbl-connector-e2e-<MARK> -f deploy/docker-compose.yml --profile app down -v`
 at the end; `.runs/` is not committed; a repeated run must start from a clean stand.

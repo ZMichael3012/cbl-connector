@@ -155,6 +155,14 @@ func (g *fakeGateway) GetPayout(ctx context.Context, _ string) (domain.PayoutSta
 	return domain.PayoutStatus{State: domain.PayoutConfirmed}, nil
 }
 
+// ExportPayments performs a fake export call.
+func (g *fakeGateway) ExportPayments(ctx context.Context, _ domain.ExportRequest) (domain.ExportPage, error) {
+	if err := g.next(ctx); err != nil {
+		return domain.ExportPage{}, err
+	}
+	return domain.ExportPage{Payments: []domain.PaymentStatus{{GatewayID: "gw-1", State: domain.StateDetected}}}, nil
+}
+
 // VerifyWebhook returns a canonical event without network access.
 func (g *fakeGateway) VerifyWebhook(_ map[string][]string, _ []byte) (domain.CanonicalEvent, error) {
 	return domain.CanonicalEvent{Type: domain.StateDetected, Provider: "fake"}, nil
@@ -796,4 +804,28 @@ func TestResilientGetRefund(t *testing.T) {
 	plain, _ := newTestResilient(t, &fakeGateway{}, testConfig())
 	_, err = plain.GetRefund(context.Background(), "rf-1")
 	require.ErrorIs(t, err, domain.ErrRefundsUnsupported)
+}
+
+// noExporterGateway presents the port without the optional PaymentExporter
+// capability: embedding the interface hides the fake export method.
+type noExporterGateway struct{ domain.PaymentGateway }
+
+func TestResilientExportPaymentsDelegates(t *testing.T) {
+	t.Parallel()
+	inner := &fakeGateway{}
+	resilient, _ := newTestResilient(t, inner, testConfig())
+
+	page, err := resilient.ExportPayments(context.Background(), domain.ExportRequest{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, page.Payments, 1)
+	assert.Equal(t, "gw-1", page.Payments[0].GatewayID)
+	assert.Equal(t, 1, inner.callCount())
+}
+
+func TestResilientExportPaymentsWithoutCapability(t *testing.T) {
+	t.Parallel()
+	resilient, _ := newTestResilient(t, &noExporterGateway{PaymentGateway: &fakeGateway{}}, testConfig())
+
+	_, err := resilient.ExportPayments(context.Background(), domain.ExportRequest{})
+	require.ErrorIs(t, err, domain.ErrRejected)
 }

@@ -3,6 +3,8 @@ package transport_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +27,10 @@ type fakeGateway struct {
 	createCalls int
 	status      domain.PaymentStatus
 	statusErr   error
+	exportPage  domain.ExportPage
+	exportErr   error
+	exportCalls int
+	lastExport  domain.ExportRequest
 }
 
 func (f *fakeGateway) CreateInvoice(_ context.Context, req domain.CreateInvoiceRequest) (domain.Invoice, error) {
@@ -54,6 +60,15 @@ func (f *fakeGateway) CreatePayout(_ context.Context, _ domain.PayoutRequest) (d
 
 func (f *fakeGateway) GetPayout(_ context.Context, _ string) (domain.PayoutStatus, error) {
 	return domain.PayoutStatus{}, nil
+}
+
+func (f *fakeGateway) ExportPayments(_ context.Context, req domain.ExportRequest) (domain.ExportPage, error) {
+	f.exportCalls++
+	f.lastExport = req
+	if f.exportErr != nil {
+		return domain.ExportPage{}, f.exportErr
+	}
+	return f.exportPage, nil
 }
 
 func (f *fakeGateway) Capabilities() domain.Capabilities {
@@ -378,9 +393,222 @@ func TestGetCapabilities(t *testing.T) {
 	require.NotNil(t, byNetwork["ethereum"].GetMaxAmount())
 }
 
-func TestListGatewayPaymentsDeferred(t *testing.T) {
+// bareGateway presents a gateway port without the optional PaymentExporter
+// capability: embedding the interface hides the fake export method, so the
+// missing-capability path is exercised.
+type bareGateway struct{ domain.PaymentGateway }
+
+// newServerWith builds a server over the given gateways map.
+func newServerWith(gateways map[string]domain.PaymentGateway) *transport.ConnectorServer {
+	return transport.NewConnectorServer(&fakeSelector{}, gateways, &fakeMapping{}, &fakeCaps{}, nil)
+}
+
+// listRequest builds a valid export request (provider casing varies on purpose).
+func listRequest() *connectorv1.ListGatewayPaymentsRequest {
+	now := time.Now().UTC()
+	return &connectorv1.ListGatewayPaymentsRequest{
+		Provider: " CoinGate ",
+		From:     timestamppb.New(now.Add(-2 * time.Hour)),
+		To:       timestamppb.New(now.Add(-time.Hour)),
+	}
+}
+
+func TestListGatewayPaymentsPage(t *testing.T) {
+	t.Parallel()
+	eventTS := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	gateway := &fakeGateway{exportPage: domain.ExportPage{
+		Payments: []domain.PaymentStatus{{
+			GatewayID:      "gw-1",
+			PaymentID:      "018f8f5c-3f7a-7b2e-9c4d-2a1b3c4d5e6f",
+			Provider:       "coingate",
+			State:          domain.StateConfirmed,
+			RawStatus:      "paid",
+			ReceivedAmount: money.MustParse("5", "USDT", 6),
+			Confirmations:  3,
+			TXID:           "0xabc",
+			Network:        "usdt_trc20",
+			GatewayEventTS: eventTS,
+		}},
+		NextCursor: domain.EncodeExportCursor(2),
+	}}
+	server := newServer(t, gateway, &fakeSelector{}, &fakeMapping{}, &fakeCaps{})
+
+	request := listRequest()
+	request.Cursor = domain.EncodeExportCursor(100)
+	response, err := server.ListGatewayPayments(context.Background(), request)
+	require.NoError(t, err)
+	require.Len(t, response.GetPayments(), 1)
+	row := response.GetPayments()[0]
+	require.Equal(t, "gw-1", row.GetGatewayId())
+	require.Equal(t, "018f8f5c-3f7a-7b2e-9c4d-2a1b3c4d5e6f", row.GetPaymentId())
+	require.Equal(t, connectorv1.CanonicalPaymentStatusValue_CANONICAL_PAYMENT_STATUS_VALUE_CONFIRMED, row.GetStatus())
+	require.Equal(t, "paid", row.GetRawStatus())
+	require.Equal(t, int64(5000000), row.GetReceivedAmount().GetMinorUnits())
+	require.Equal(t, "USDT", row.GetReceivedAmount().GetAsset())
+	require.Equal(t, uint32(6), row.GetReceivedAmount().GetDecimals())
+	require.Equal(t, uint32(3), row.GetConfirmations())
+	require.Equal(t, "0xabc", row.GetTxid())
+	require.Equal(t, "usdt_trc20", row.GetNetwork())
+	require.Equal(t, eventTS, row.GetGatewayEventTs().AsTime())
+	require.Equal(t, domain.EncodeExportCursor(2), response.GetNextCursor())
+
+	require.Equal(t, 1, gateway.exportCalls)
+	require.Equal(t, 100, gateway.lastExport.Limit, "an unset limit defaults to 100")
+	require.Equal(t, domain.EncodeExportCursor(100), gateway.lastExport.Cursor, "the cursor is passed to the exporter")
+	require.False(t, gateway.lastExport.From.IsZero())
+	require.True(t, gateway.lastExport.To.After(gateway.lastExport.From))
+}
+
+func TestListGatewayPaymentsUnmappedRow(t *testing.T) {
+	t.Parallel()
+	gateway := &fakeGateway{exportPage: domain.ExportPage{
+		Payments: []domain.PaymentStatus{{
+			GatewayID: "gw-9",
+			State:     "",
+			RawStatus: "strange_new_state",
+		}},
+	}}
+	server := newServer(t, gateway, &fakeSelector{}, &fakeMapping{}, &fakeCaps{})
+
+	response, err := server.ListGatewayPayments(context.Background(), listRequest())
+	require.NoError(t, err)
+	require.Len(t, response.GetPayments(), 1)
+	row := response.GetPayments()[0]
+	require.Equal(t, connectorv1.CanonicalPaymentStatusValue_CANONICAL_PAYMENT_STATUS_VALUE_UNSPECIFIED, row.GetStatus())
+	require.Equal(t, "strange_new_state", row.GetRawStatus(), "the raw provider word is preserved")
+	require.Nil(t, row.GetReceivedAmount(), "missing amount evidence leaves the field unset, not zero")
+	require.Empty(t, response.GetNextCursor())
+}
+
+func TestListGatewayPaymentsUnknownProvider(t *testing.T) {
 	t.Parallel()
 	server := newServer(t, &fakeGateway{}, &fakeSelector{}, &fakeMapping{}, &fakeCaps{})
-	_, err := server.ListGatewayPayments(context.Background(), &connectorv1.ListGatewayPaymentsRequest{Provider: "coingate"})
-	require.Equal(t, codes.Unimplemented, status.Code(err))
+	request := listRequest()
+	request.Provider = "nope"
+
+	_, err := server.ListGatewayPayments(context.Background(), request)
+	require.Equal(t, codes.NotFound, status.Code(err))
+
+	request.Provider = " "
+	_, err = server.ListGatewayPayments(context.Background(), request)
+	require.Equal(t, codes.InvalidArgument, status.Code(err), "an empty provider is invalid")
+}
+
+func TestListGatewayPaymentsWindowValidation(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	base := func() *connectorv1.ListGatewayPaymentsRequest {
+		return &connectorv1.ListGatewayPaymentsRequest{
+			Provider: "coingate",
+			From:     timestamppb.New(now.Add(-2 * time.Hour)),
+			To:       timestamppb.New(now.Add(-time.Hour)),
+		}
+	}
+	cases := map[string]func(*connectorv1.ListGatewayPaymentsRequest){
+		"missing from": func(r *connectorv1.ListGatewayPaymentsRequest) { r.From = nil },
+		"missing to":   func(r *connectorv1.ListGatewayPaymentsRequest) { r.To = nil },
+		"reversed":     func(r *connectorv1.ListGatewayPaymentsRequest) { r.From = timestamppb.New(now) },
+		"window over 31 days": func(r *connectorv1.ListGatewayPaymentsRequest) {
+			r.From = timestamppb.New(now.Add(-40 * 24 * time.Hour))
+		},
+		"future bound": func(r *connectorv1.ListGatewayPaymentsRequest) {
+			r.To = timestamppb.New(now.Add(30 * time.Minute))
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			gateway := &fakeGateway{}
+			server := newServer(t, gateway, &fakeSelector{}, &fakeMapping{}, &fakeCaps{})
+			request := base()
+			mutate(request)
+			_, err := server.ListGatewayPayments(context.Background(), request)
+			require.Equal(t, codes.InvalidArgument, status.Code(err), name)
+			require.Zero(t, gateway.exportCalls, "invalid input must not reach the provider")
+		})
+	}
+}
+
+func TestListGatewayPaymentsLimitBounds(t *testing.T) {
+	t.Parallel()
+	gateway := &fakeGateway{}
+	server := newServer(t, gateway, &fakeSelector{}, &fakeMapping{}, &fakeCaps{})
+
+	request := listRequest()
+	request.Limit = 500
+	_, err := server.ListGatewayPayments(context.Background(), request)
+	require.NoError(t, err)
+	require.Equal(t, 500, gateway.lastExport.Limit)
+
+	request = listRequest()
+	request.Limit = 501
+	_, err = server.ListGatewayPayments(context.Background(), request)
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	require.Equal(t, 1, gateway.exportCalls, "the oversized limit must not reach the provider")
+
+	request = listRequest()
+	request.Cursor = strings.Repeat("a", 65)
+	_, err = server.ListGatewayPayments(context.Background(), request)
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	require.Equal(t, 1, gateway.exportCalls, "an oversized cursor must not reach the provider")
+}
+
+func TestListGatewayPaymentsErrorMapping(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		err  error
+		code codes.Code
+	}{
+		"temporary":       {err: domain.ErrTemporary, code: codes.Unavailable},
+		"gateway missing": {err: domain.ErrGatewayNotFound, code: codes.NotFound},
+		"bad cursor":      {err: fmt.Errorf("%w: cursor", domain.ErrInvalidGatewayRequest), code: codes.InvalidArgument},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			gateway := &fakeGateway{exportErr: tc.err}
+			server := newServer(t, gateway, &fakeSelector{}, &fakeMapping{}, &fakeCaps{})
+			_, err := server.ListGatewayPayments(context.Background(), listRequest())
+			require.Equal(t, tc.code, status.Code(err), name)
+		})
+	}
+}
+
+func TestListGatewayPaymentsWithoutCapability(t *testing.T) {
+	t.Parallel()
+	server := newServerWith(map[string]domain.PaymentGateway{"coingate": &bareGateway{PaymentGateway: &fakeGateway{}}})
+	_, err := server.ListGatewayPayments(context.Background(), listRequest())
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+}
+
+func TestListGatewayPaymentsRejectsAdapterViolations(t *testing.T) {
+	t.Parallel()
+	t.Run("mapped state outside the allowlist", func(t *testing.T) {
+		gateway := &fakeGateway{exportPage: domain.ExportPage{
+			Payments: []domain.PaymentStatus{{GatewayID: "gw-1", State: domain.State("weird")}},
+		}}
+		server := newServer(t, gateway, &fakeSelector{}, &fakeMapping{}, &fakeCaps{})
+		_, err := server.ListGatewayPayments(context.Background(), listRequest())
+		require.Equal(t, codes.Internal, status.Code(err))
+	})
+	t.Run("page above the requested limit", func(t *testing.T) {
+		gateway := &fakeGateway{exportPage: domain.ExportPage{
+			Payments: []domain.PaymentStatus{
+				{GatewayID: "gw-1", State: domain.StateDetected},
+				{GatewayID: "gw-2", State: domain.StateDetected},
+				{GatewayID: "gw-3", State: domain.StateDetected},
+			},
+		}}
+		server := newServer(t, gateway, &fakeSelector{}, &fakeMapping{}, &fakeCaps{})
+		request := listRequest()
+		request.Limit = 2
+		_, err := server.ListGatewayPayments(context.Background(), request)
+		require.Equal(t, codes.Internal, status.Code(err))
+	})
+	t.Run("row without any status evidence", func(t *testing.T) {
+		gateway := &fakeGateway{exportPage: domain.ExportPage{
+			Payments: []domain.PaymentStatus{{GatewayID: "gw-1"}},
+		}}
+		server := newServer(t, gateway, &fakeSelector{}, &fakeMapping{}, &fakeCaps{})
+		_, err := server.ListGatewayPayments(context.Background(), listRequest())
+		require.Equal(t, codes.Internal, status.Code(err), "a row with no state and no raw word is an adapter violation")
+	})
 }

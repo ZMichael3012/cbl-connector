@@ -137,6 +137,20 @@ func (l *Limited) GetRefund(ctx context.Context, gatewayRefundID string) (domain
 	return refundStatus.GetRefund(ctx, gatewayRefundID)
 }
 
+// ExportPayments implements the optional SPI v1 export interface (17.13): the
+// export is a read and uses the status bucket; a wrapped gateway without the
+// capability is a business rejection.
+func (l *Limited) ExportPayments(ctx context.Context, req domain.ExportRequest) (domain.ExportPage, error) {
+	exporter, ok := l.next.(domain.PaymentExporter)
+	if !ok {
+		return domain.ExportPage{}, fmt.Errorf("%w: provider %q does not support payment exports", domain.ErrRejected, l.key)
+	}
+	if err := l.guard(ctx, limitOperationStatus); err != nil {
+		return domain.ExportPage{}, err
+	}
+	return exporter.ExportPayments(ctx, req)
+}
+
 // Capabilities implements the port without a token: it is a local read.
 func (l *Limited) Capabilities() domain.Capabilities {
 	return l.next.Capabilities()

@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,9 +64,10 @@ type Adapter struct {
 }
 
 var (
-	_ domain.PaymentGateway = (*Adapter)(nil)
-	_ domain.LookupGateway  = (*Adapter)(nil)
-	_ domain.Refunder       = (*Adapter)(nil)
+	_ domain.PaymentGateway  = (*Adapter)(nil)
+	_ domain.LookupGateway   = (*Adapter)(nil)
+	_ domain.Refunder        = (*Adapter)(nil)
+	_ domain.PaymentExporter = (*Adapter)(nil)
 )
 
 // New validates the configuration and builds the adapter.
@@ -289,6 +291,60 @@ func (a *Adapter) statusOf(gatewayID string, decoded invoiceResponse) (domain.Pa
 		ReceivedAmount: received,
 		GatewayEventTS: eventTS,
 	}, nil
+}
+
+// ExportPayments returns one page of invoice records for reconciliation
+// (17.13): the walk is offset-based, the window crosses the wire in unix
+// seconds and rows are mapped fail-soft.
+func (a *Adapter) ExportPayments(ctx context.Context, req domain.ExportRequest) (domain.ExportPage, error) {
+	offset, err := domain.ExportOffsetParams(req.Cursor, req.Limit)
+	if err != nil {
+		return domain.ExportPage{}, err
+	}
+	query := url.Values{}
+	query.Set("skip", strconv.Itoa(offset))
+	query.Set("take", strconv.Itoa(req.Limit))
+	query.Set("startDate", strconv.FormatInt(req.From.UTC().Unix(), 10))
+	query.Set("endDate", strconv.FormatInt(req.To.UTC().Unix(), 10))
+	payload, err := a.request(ctx, http.MethodGet, a.storePath("/invoices")+"?"+query.Encode(), nil, domain.ErrGatewayNotFound)
+	if err != nil {
+		return domain.ExportPage{}, err
+	}
+	var rows []invoiceResponse
+	if err := json.Unmarshal(payload, &rows); err != nil {
+		return domain.ExportPage{}, fmt.Errorf("btcpay: decode invoice export: %w", err)
+	}
+	payments := make([]domain.PaymentStatus, 0, len(rows))
+	for _, row := range rows {
+		payments = append(payments, a.exportStatusOf(row))
+	}
+	return domain.ExportPage{
+		Payments:   payments,
+		NextCursor: domain.ExportNextCursor(offset, len(payments), req.Limit),
+	}, nil
+}
+
+// exportStatusOf maps an invoice body fail-soft (17.13): an unknown status
+// word leaves the canonical state empty and an unparsable amount stays zero.
+func (a *Adapter) exportStatusOf(decoded invoiceResponse) domain.PaymentStatus {
+	status := domain.PaymentStatus{
+		GatewayID: decoded.ID,
+		PaymentID: decoded.Metadata["orderId"],
+		Provider:  "btcpay",
+		State:     invoiceStates[decoded.Status],
+		RawStatus: decoded.Status,
+	}
+	if decoded.AmountPaid != "" {
+		if decimals, err := a.decimalsFor(decoded.Currency); err == nil {
+			if parsed, err := money.Parse(decoded.AmountPaid, strings.ToUpper(decoded.Currency), decimals); err == nil {
+				status.ReceivedAmount = parsed
+			}
+		}
+	}
+	if decoded.CreatedTime > 0 {
+		status.GatewayEventTS = time.Unix(decoded.CreatedTime, 0).UTC()
+	}
+	return status
 }
 
 // invoiceStates maps Greenfield invoice statuses to canonical states.

@@ -25,6 +25,10 @@ const (
 	attemptTimeoutPayment      = time.Second
 	attemptTimeoutPayout       = 2 * time.Second
 	attemptTimeoutPayoutStatus = time.Second
+	// attemptTimeoutExport stays well below the 10 s ListGatewayPayments
+	// deadline (CBL-003) so a hung provider cannot burn the whole caller
+	// budget in one attempt and the shared bulkhead slot is released quickly.
+	attemptTimeoutExport = 3 * time.Second
 )
 
 // Config describes the resilience parameters of provider calls.
@@ -355,6 +359,19 @@ func (r *Resilient) GetRefund(ctx context.Context, gatewayRefundID string) (doma
 	}
 	return call(r, ctx, "GetRefund", attemptTimeoutPayoutStatus, func(attemptCtx context.Context) (domain.PayoutStatus, error) {
 		return inner.GetRefund(attemptCtx, gatewayRefundID)
+	})
+}
+
+// ExportPayments forwards the optional per-provider export capability through
+// the resilience pipeline (17.13); the attempt timeout is the export budget
+// (CBL-003 names 10 s for ListGatewayPayments).
+func (r *Resilient) ExportPayments(ctx context.Context, req domain.ExportRequest) (domain.ExportPage, error) {
+	inner, ok := r.inner.(domain.PaymentExporter)
+	if !ok {
+		return domain.ExportPage{}, fmt.Errorf("%w: payment exports are not supported", domain.ErrRejected)
+	}
+	return call(r, ctx, "ExportPayments", attemptTimeoutExport, func(attemptCtx context.Context) (domain.ExportPage, error) {
+		return inner.ExportPayments(attemptCtx, req)
 	})
 }
 

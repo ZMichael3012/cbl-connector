@@ -32,6 +32,17 @@ const (
 	mappingSaveTimeout   = 5 * time.Second
 )
 
+// Export bounds (17.13): one page is bounded, the window keeps a provider
+// export call predictable, the cursor is a short opaque token and the future
+// skew rejects nonsensical windows while tolerating clock drift.
+const (
+	defaultExportLimit = 100
+	maxExportLimit     = 500
+	maxExportWindow    = 31 * 24 * time.Hour
+	exportFutureSkew   = 5 * time.Minute
+	maxExportCursorLen = 64
+)
+
 // InvoiceMappingStore persists the payment to provider invoice mapping (17.2):
 // Save is idempotent per (provider, gateway_id), ByOrderID backs the idempotent
 // replay of a retried creation (T-CONNECTOR-07).
@@ -46,9 +57,8 @@ type CapabilitiesProvider interface {
 }
 
 // ConnectorServer implements the money-path ConnectorService: invoice creation
-// through the router, status reads and capabilities. ListGatewayPayments is
-// deferred to the reconciliation task 17.13 (the per-provider export shape is
-// defined there).
+// through the router, status reads, capabilities and the per-provider
+// reconciliation export (17.13).
 type ConnectorServer struct {
 	connectorv1.UnimplementedConnectorServiceServer
 
@@ -233,10 +243,90 @@ func (s *ConnectorServer) GetCapabilities(ctx context.Context, req *connectorv1.
 	return &connectorv1.GetCapabilitiesResponse{Capabilities: capabilities}, nil
 }
 
-// ListGatewayPayments is deferred to the reconciliation task: the per-provider
-// export shape is defined there.
-func (s *ConnectorServer) ListGatewayPayments(context.Context, *connectorv1.ListGatewayPaymentsRequest) (*connectorv1.ListGatewayPaymentsResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "list gateway payments is not available yet")
+// ListGatewayPayments returns one page of provider operations for the
+// reconciliation export (17.13): the request is validated before any provider
+// call, the provider is resolved from the wired gateways and the page is
+// serialized with the canonical status. A row the adapter could not map
+// arrives with the raw provider word and an UNSPECIFIED status: the raw word
+// is the reconciliation evidence and the state is never fabricated.
+func (s *ConnectorServer) ListGatewayPayments(ctx context.Context, req *connectorv1.ListGatewayPaymentsRequest) (*connectorv1.ListGatewayPaymentsResponse, error) {
+	provider := strings.ToLower(strings.TrimSpace(req.GetProvider()))
+	if provider == "" {
+		return nil, status.Error(codes.InvalidArgument, "provider is required")
+	}
+	selected, ok := s.gateways[provider]
+	if !ok {
+		return nil, status.Error(codes.NotFound, fmt.Sprintf("provider %q is not registered", provider))
+	}
+	if req.GetFrom() == nil || req.GetTo() == nil {
+		return nil, status.Error(codes.InvalidArgument, "from and to are required")
+	}
+	from := req.GetFrom().AsTime().UTC()
+	to := req.GetTo().AsTime().UTC()
+	switch {
+	case !from.Before(to):
+		return nil, status.Error(codes.InvalidArgument, "from must be before to")
+	case to.Sub(from) > maxExportWindow:
+		return nil, status.Error(codes.InvalidArgument, "the export window exceeds 31 days")
+	case to.After(time.Now().UTC().Add(exportFutureSkew)):
+		return nil, status.Error(codes.InvalidArgument, "to must not be in the future")
+	}
+	limit := int(req.GetLimit())
+	if limit == 0 {
+		limit = defaultExportLimit
+	}
+	if limit > maxExportLimit {
+		return nil, status.Error(codes.InvalidArgument, "limit exceeds the export bound")
+	}
+	cursor := strings.TrimSpace(req.GetCursor())
+	if len(cursor) > maxExportCursorLen {
+		return nil, status.Error(codes.InvalidArgument, "cursor exceeds the export bound")
+	}
+	exporter, ok := selected.(domain.PaymentExporter)
+	if !ok {
+		return nil, status.Error(codes.FailedPrecondition, fmt.Sprintf("provider %q does not support payment exports", provider))
+	}
+	page, err := exporter.ExportPayments(ctx, domain.ExportRequest{
+		From:   from,
+		To:     to,
+		Limit:  limit,
+		Cursor: cursor,
+	})
+	if err != nil {
+		return nil, statusFromError(err)
+	}
+	if len(page.Payments) > limit {
+		s.log.Error("provider export exceeded the page limit",
+			zap.String("provider", provider),
+			zap.Int("rows", len(page.Payments)),
+			zap.Int("limit", limit),
+		)
+		return nil, status.Error(codes.Internal, "provider export exceeded the page limit")
+	}
+	payments := make([]*connectorv1.CanonicalPaymentStatus, 0, len(page.Payments))
+	for _, payment := range page.Payments {
+		if payment.State == "" && payment.RawStatus == "" {
+			s.log.Error("provider export row carries no state", zap.String("provider", provider))
+			return nil, status.Error(codes.Internal, "provider export row carries no state")
+		}
+		if payment.State != "" {
+			switch payment.State {
+			case domain.StateDetected, domain.StateConfirmed, domain.StateFailed,
+				domain.StateExpired, domain.StateUnderpaid, domain.StateOverpaid:
+			default:
+				s.log.Error("provider returned an unknown state in the export",
+					zap.String("provider", provider),
+					zap.String("state", string(payment.State)),
+				)
+				return nil, status.Error(codes.Internal, "provider returned an unknown state in the export")
+			}
+		}
+		payments = append(payments, canonicalStatus(payment))
+	}
+	return &connectorv1.ListGatewayPaymentsResponse{
+		Payments:   payments,
+		NextCursor: page.NextCursor,
+	}, nil
 }
 
 // validateCreateInvoice checks the request invariants before any provider call.
@@ -304,18 +394,22 @@ func requestHash(req *connectorv1.CreateInvoiceRequest) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// canonicalStatus maps the domain status to the contract message.
+// canonicalStatus maps the domain status to the contract message. A missing
+// amount evidence (empty asset) leaves received_amount unset on the wire: an
+// absent field and a genuine zero must not be confused by consumers.
 func canonicalStatus(payment domain.PaymentStatus) *connectorv1.CanonicalPaymentStatus {
 	message := &connectorv1.CanonicalPaymentStatus{
-		PaymentId:      payment.PaymentID,
-		GatewayId:      payment.GatewayID,
-		Provider:       payment.Provider,
-		Status:         canonicalStatusValue(payment.State),
-		ReceivedAmount: protoMoney(payment.ReceivedAmount),
-		Confirmations:  payment.Confirmations,
-		Txid:           payment.TXID,
-		Network:        payment.Network,
-		RawStatus:      payment.RawStatus,
+		PaymentId:     payment.PaymentID,
+		GatewayId:     payment.GatewayID,
+		Provider:      payment.Provider,
+		Status:        canonicalStatusValue(payment.State),
+		Confirmations: payment.Confirmations,
+		Txid:          payment.TXID,
+		Network:       payment.Network,
+		RawStatus:     payment.RawStatus,
+	}
+	if payment.ReceivedAmount.Asset != "" {
+		message.ReceivedAmount = protoMoney(payment.ReceivedAmount)
 	}
 	if !payment.GatewayEventTS.IsZero() {
 		message.GatewayEventTs = timestamppb.New(payment.GatewayEventTS)

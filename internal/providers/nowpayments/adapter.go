@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,8 +62,9 @@ type Adapter struct {
 }
 
 var (
-	_ domain.PaymentGateway = (*Adapter)(nil)
-	_ domain.LookupGateway  = (*Adapter)(nil)
+	_ domain.PaymentGateway  = (*Adapter)(nil)
+	_ domain.LookupGateway   = (*Adapter)(nil)
+	_ domain.PaymentExporter = (*Adapter)(nil)
 )
 
 // New validates the configuration and builds the adapter.
@@ -312,6 +314,67 @@ func (a *Adapter) statusOf(gatewayID string, decoded paymentResponse) (domain.Pa
 		Network:        network,
 		GatewayEventTS: eventTS,
 	}, nil
+}
+
+// ExportPayments returns one page of payment records for reconciliation
+// (17.13): the walk is page-based, a full page continues the walk and a row
+// whose status word or amount cannot be resolved is exported fail-soft (the
+// raw word is the reconciliation evidence, the page keeps going).
+func (a *Adapter) ExportPayments(ctx context.Context, req domain.ExportRequest) (domain.ExportPage, error) {
+	offset, page, err := domain.ExportPageParams(req.Cursor, req.Limit)
+	if err != nil {
+		return domain.ExportPage{}, err
+	}
+	query := url.Values{}
+	query.Set("limit", strconv.Itoa(req.Limit))
+	query.Set("page", strconv.Itoa(page))
+	query.Set("dateFrom", req.From.UTC().Format(time.RFC3339))
+	query.Set("dateTo", req.To.UTC().Format(time.RFC3339))
+	payload, err := a.request(ctx, http.MethodGet, "/v1/payment/?"+query.Encode(), nil, domain.ErrGatewayNotFound)
+	if err != nil {
+		return domain.ExportPage{}, err
+	}
+	rows, err := providerwire.DecodeEnvelopeOrArray[paymentResponse](payload, "data")
+	if err != nil {
+		return domain.ExportPage{}, fmt.Errorf("nowpayments: decode payment export: %w", err)
+	}
+	payments := make([]domain.PaymentStatus, 0, len(rows))
+	for _, row := range rows {
+		payments = append(payments, a.exportStatusOf(row))
+	}
+	return domain.ExportPage{
+		Payments:   payments,
+		NextCursor: domain.ExportNextCursor(offset, len(payments), req.Limit),
+	}, nil
+}
+
+// exportStatusOf maps a payment body fail-soft (17.13): an unknown status word
+// leaves the canonical state empty and an unparsable amount stays zero, so one
+// odd row cannot block the reconciliation window.
+func (a *Adapter) exportStatusOf(decoded paymentResponse) domain.PaymentStatus {
+	status := domain.PaymentStatus{
+		GatewayID: decoded.PaymentID,
+		PaymentID: decoded.OrderID,
+		Provider:  "nowpayments",
+		State:     paymentStates[decoded.PaymentStatus],
+		RawStatus: decoded.PaymentStatus,
+	}
+	if decoded.UpdatedAt != "" {
+		if parsed, err := time.Parse(time.RFC3339, decoded.UpdatedAt); err == nil {
+			status.GatewayEventTS = parsed.UTC()
+		}
+	}
+	if decoded.ActuallyPaid.String() != "" && decoded.PayCurrency != "" {
+		if asset, scale, err := a.resolvePayAsset(decoded.PayCurrency); err == nil {
+			if parsed, err := money.ParseJSONNumber(decoded.ActuallyPaid, asset, scale); err == nil {
+				status.ReceivedAmount = parsed
+			}
+		}
+	}
+	if decoded.PayCurrency != "" {
+		status.Network = strings.ToLower(strings.TrimSpace(decoded.PayCurrency))
+	}
+	return status
 }
 
 // paymentStates maps NOWPayments statuses to canonical states.

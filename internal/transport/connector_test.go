@@ -269,6 +269,8 @@ func TestCreateInvoiceReplaysExistingOrder(t *testing.T) {
 	second, err := server.CreateInvoice(context.Background(), createRequest())
 	require.NoError(t, err)
 	require.Equal(t, first.GetGatewayInvoiceId(), second.GetGatewayInvoiceId())
+	require.Equal(t, "https://checkout.example/777", second.GetCheckoutUrl(),
+		"the replay returns the stored destination so the payment can reach pending (4.2)")
 	require.Equal(t, 1, gateway.createCalls)
 	require.Zero(t, mapping.saveHits)
 }

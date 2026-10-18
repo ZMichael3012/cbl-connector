@@ -182,6 +182,10 @@ const (
 	maxRawStatusLen = 64
 	minAssetLen     = 2
 	maxAssetLen     = 16
+	// maxInvoiceAddressLen bounds the stored deposit address (4.2).
+	maxInvoiceAddressLen = 256
+	// maxInvoiceCheckoutLen bounds the stored checkout page (4.2).
+	maxInvoiceCheckoutLen = 2048
 )
 
 // Validate checks the mandatory fields of the canonical event before publication.
@@ -397,6 +401,11 @@ type ProviderInvoice struct {
 	OrderID string
 	// RequestHash sets the hash of the creation request for conflict checks.
 	RequestHash string
+	// Address sets the deposit address of the created invoice (4.2): the replay
+	// of a create whose response was lost returns it to the caller.
+	Address string
+	// CheckoutURL sets the hosted checkout page of the created invoice (4.2).
+	CheckoutURL string
 	// CreatedAt sets the mapping creation time.
 	CreatedAt time.Time
 }
@@ -425,6 +434,12 @@ func (m ProviderInvoice) Validate() error {
 	}
 	if !validPrintable(m.OrderID, maxGatewayIDLen) {
 		return fmt.Errorf("%w: invalid order_id", ErrInvalidProviderInvoice)
+	}
+	if m.Address != "" && !validPrintable(m.Address, maxInvoiceAddressLen) {
+		return fmt.Errorf("%w: invalid address", ErrInvalidProviderInvoice)
+	}
+	if m.CheckoutURL != "" && !validPrintable(m.CheckoutURL, maxInvoiceCheckoutLen) {
+		return fmt.Errorf("%w: invalid checkout url", ErrInvalidProviderInvoice)
 	}
 	return nil
 }

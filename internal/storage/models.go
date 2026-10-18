@@ -88,6 +88,10 @@ type ProviderInvoiceRow struct {
 	OrderID string `gorm:"column:order_id"`
 	// RequestHash specifies the hash of the creation request.
 	RequestHash string `gorm:"column:request_hash"`
+	// Address specifies the deposit address of the created invoice (4.2).
+	Address *string `gorm:"column:address"`
+	// CheckoutURL specifies the hosted checkout page of the created invoice (4.2).
+	CheckoutURL *string `gorm:"column:checkout_url"`
 	// CreatedAt specifies the mapping creation time.
 	CreatedAt time.Time `gorm:"column:created_at"`
 }

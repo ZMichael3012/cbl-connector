@@ -115,9 +115,13 @@ func (s *ConnectorServer) CreateInvoice(ctx context.Context, req *connectorv1.Cr
 		if existing.RequestHash != hash {
 			return nil, status.Error(codes.AlreadyExists, "the order is already mapped with a different request")
 		}
+		// The replay returns the stored destination so a payment that lost the
+		// first response can still reach its address (4.2).
 		return &connectorv1.CreateInvoiceResponse{
 			GatewayInvoiceId: existing.GatewayID,
 			Provider:         provider,
+			Address:          existing.Address,
+			CheckoutUrl:      existing.CheckoutURL,
 		}, nil
 	} else if !errors.Is(lookupErr, domain.ErrProviderInvoiceNotFound) {
 		s.log.Error("invoice mapping lookup failed", zap.String("provider", provider), zap.Error(lookupErr))
@@ -152,6 +156,8 @@ func (s *ConnectorServer) CreateInvoice(ctx context.Context, req *connectorv1.Cr
 			PaymentID:   paymentID,
 			OrderID:     paymentID,
 			RequestHash: hash,
+			Address:     invoice.Address,
+			CheckoutURL: invoice.CheckoutURL,
 		})
 		if mapErr != nil {
 			// Without the mapping real webhooks cannot attribute the invoice:

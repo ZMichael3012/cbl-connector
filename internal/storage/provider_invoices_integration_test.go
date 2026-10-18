@@ -65,3 +65,24 @@ func TestProviderInvoicesRepositoryValidation(t *testing.T) {
 	_, _, err := repo.Save(ctx, invalid)
 	require.ErrorIs(t, err, domain.ErrInvalidProviderInvoice)
 }
+
+func TestProviderInvoicesDestinationRoundTrip(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := setupConnectorDB(t)
+	repo := storage.NewProviderInvoicesRepository(db)
+
+	// The destination survives the mapping round trip so the idempotent replay
+	// of a lost create response can return it (4.2).
+	invoice := testMapping("018f8f5c-3f7a-7b2e-9c4d-2a1b3c4d5e70")
+	invoice.Address = "TE2eAddress"
+	invoice.CheckoutURL = "https://checkout.example/42"
+	_, created, err := repo.Save(ctx, invoice)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	replayed, err := repo.ByOrderID(ctx, "coingate", invoice.PaymentID)
+	require.NoError(t, err)
+	require.Equal(t, "TE2eAddress", replayed.Address)
+	require.Equal(t, "https://checkout.example/42", replayed.CheckoutURL)
+}

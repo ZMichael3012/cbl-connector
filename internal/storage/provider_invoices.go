@@ -53,6 +53,12 @@ func (r *ProviderInvoicesRepository) Save(ctx context.Context, invoice domain.Pr
 		RequestHash: invoice.RequestHash,
 		CreatedAt:   time.Now().UTC(),
 	}
+	if invoice.Address != "" {
+		row.Address = &invoice.Address
+	}
+	if invoice.CheckoutURL != "" {
+		row.CheckoutURL = &invoice.CheckoutURL
+	}
 	result := r.db.WithContext(ctx).
 		Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "provider"}, {Name: "gateway_id"}},
@@ -145,7 +151,7 @@ func (r *ProviderInvoicesRepository) byGatewayID(ctx context.Context, provider, 
 
 // rowToDomain converts a storage row to the domain mapping.
 func rowToDomain(row ProviderInvoiceRow) domain.ProviderInvoice {
-	return domain.ProviderInvoice{
+	invoice := domain.ProviderInvoice{
 		Provider:    row.Provider,
 		GatewayID:   row.GatewayID,
 		PaymentID:   row.PaymentID,
@@ -153,4 +159,11 @@ func rowToDomain(row ProviderInvoiceRow) domain.ProviderInvoice {
 		RequestHash: row.RequestHash,
 		CreatedAt:   row.CreatedAt,
 	}
+	if row.Address != nil {
+		invoice.Address = *row.Address
+	}
+	if row.CheckoutURL != nil {
+		invoice.CheckoutURL = *row.CheckoutURL
+	}
+	return invoice
 }

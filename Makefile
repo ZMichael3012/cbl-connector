@@ -9,7 +9,7 @@ test:
 test-integration:
 	go test -tags integration -count=1 ./internal/...
 
-# test-e2e runs the normalizer end-to-end scenario on testcontainers Kafka+PostgreSQL.
+# test-e2e runs the e2e scenarios (normalizer and payout pipeline) on testcontainers Kafka+PostgreSQL.
 test-e2e:
 	go test -tags e2e -count=1 ./test/e2e/
 
@@ -36,3 +36,4 @@ up:
 
 down:
 	docker compose -f deploy/docker-compose.yml down -v
+

@@ -22,7 +22,8 @@ Out of scope: other platform services; interaction only via `cbl-protos` contrac
 - Kafka produces: gateway.events.canonical, gateway.payout.events
 - Kafka consumes: gateway.webhooks.raw, payout.commands
 - Storage: PostgreSQL connector (`routing_rules`, `routing_config` revision,
-  `disabled_providers`, `provider_invoices`), Redis (routes, circuit breaker)
+  `disabled_providers`, `provider_invoices`, `provider_payouts`), Redis (routes,
+  circuit breaker)
 
 Contracts are frozen in `cbl-protos` (CF-1 for gRPC, CF-2/CF-3 for events), see `CBL-004`.
 
@@ -72,6 +73,20 @@ object order lookup, `x-signature` raw-HMAC base64 verification, ECDSA secp256k1
 request signing (hex DER `X-Signature` over url plus body, compressed-key
 `X-Identity`) with SEC1/PKCS8 PEM key loading via the decred library, statuses
 without fabrication, provisional payout/refund shapes).
+Payout pipeline (17.11): `internal/usecase/payout_processor.go` consumes
+`payout.commands` in the Guard transaction, validates the untrusted command,
+selects exactly one enabled provider by `CONNECTOR_PAYOUT_PROVIDERS` and the
+capability network/asset/amount range (`PayoutRouter`, deterministic smallest
+id, no failover), calls `CreatePayout`, records the `provider_payouts` mapping
+and publishes the submitted `gateway.payout.events` event with the provider; a
+business rejection publishes failed (sanitized reason), a temporary failure
+uses the retry topics. `internal/usecase/payout_status_worker.go` polls
+submitted rows (`CONNECTOR_PAYOUT_POLL_INTERVAL`, default 30 s), touches
+non-terminal rows and resolves the first confirmed/failed provider status with
+a CAS in the same transaction as the event (exactly one publisher). Migration
+00007 owns the mapping; the payout-side provider propagation is the
+`cbl-payout` increment. NOWPayments payouts (JWT/TOTP batch) are H2 and
+excluded from the default allowlist.
 Libraries: the standard `CBL-002` set (Gin, GORM + pgx driver, franz-go + pkg/sr, go-redis,
 goose, zap). `AutoMigrate` is forbidden, migrations are goose only, forward only.
 
@@ -81,7 +96,7 @@ goose, zap). `AutoMigrate` is forbidden, migrations are goose only, forward only
 make build        # go build ./...
 make test         # go test ./...
 make test-integration  # integration (testcontainers PostgreSQL)
-make test-e2e     # runs the normalizer end-to-end scenario on testcontainers Kafka+PostgreSQL
+make test-e2e     # runs the e2e scenarios on testcontainers Kafka+PostgreSQL (normalizer, payout pipeline)
 make vet          # go vet ./...
 make lint         # golangci-lint in Docker
 make up           # docker compose -f deploy/docker-compose.yml up -d
@@ -120,6 +135,11 @@ BitPay adapter (17.8): `CONNECTOR_BITPAY_BASE_URL` (API root; unset disables),
 (secp256k1 request-signing key, SEC1 or PKCS8; a Vault secret in production, the e2e
 scenario uses a dev key), `CONNECTOR_BITPAY_WEBHOOK_SECRET`, `CONNECTOR_BITPAY_WEBHOOK_URL`
 (optional notificationURL), `CONNECTOR_BITPAY_CAPABILITIES`, `CONNECTOR_BITPAY_TIMEOUT`.
+Payout pipeline (17.11): `CONNECTOR_PAYOUT_PROVIDERS` (CSV allowlist of providers
+that may pay out; default `btcpay,coingate,bitpay`; empty disables the pipeline),
+`CONNECTOR_PAYOUT_CONSUMER_GROUP` (default `cbl-connector-payouts`),
+`CONNECTOR_PAYOUT_POLL_INTERVAL` (status polling cadence, default 30s, minimum 1s;
+0 disables the worker).
 `CONNECTOR_PROVIDERS` (CSV allowlist) restricts the wired adapters; empty means every
 provider with a configured base URL (the e2e scenarios select one provider).
 
@@ -166,6 +186,7 @@ consumer lag; dashboards after task 0.7.
 | T-CONNECTOR-15 | BTCPay payouts and refunds use the two-step pull payment flow (verified against the regtest stand); approval flows and payout execution stay in 17.11/17.12 | the real API shape is respected (string method ids on the pull payment, destination and `BTC-CHAIN` on the payout); one flow covers payout and refund destinations | created payouts wait for operator approval before funds move (operations job); the whole `CreatePayout` is retried by the resilience stack, so a lost response can leave an orphan pull payment or payout at the provider (E-11; funds still cannot move); the stand wallet is watch-only by design so signing happens on the provider | `CreatePayout`/`CreateRefund` return the payout id with the submitted state and the pull payment name carries the platform payout id for dedupe; 17.11 approves only the returned id and owns the compensation, 17.12 the refund orchestration; 17.16 keeps the wire shapes re-validated |
 | T-CONNECTOR-17 | The CoinGate payout/refund and NOWPayments payout wire shapes are provisional (`POST /v2/send_request` with `request_id`, `GET /v2/send_requests/{id}`, `POST /v2/refunds`; `POST /v1/payout`), pinned by the 17.5 fixtures and exercised per the conformance suite | the adapter surface is complete for CONF-7 without pre-empting the provider confirmation flows (CoinGate Send Request 2FA, NOW JWT + TOTP batches) and the refund callbacks | the real provider endpoints and their states may differ from the provisional shapes | 17.11 owns the payout flows and 17.12 the refunds; the sandbox runs of 17.16 re-validate both; the adapter shapes are confined to `internal/providers/<provider>` |
 | T-CONNECTOR-18 | BitPay request signing (17.8) lives in the adapter with the new dependency `github.com/decred/dcrd/dcrec/secp256k1/v4` (the only default-set deviation): the key from `CONNECTOR_BITPAY_PRIVATE_KEY_PEM` (Vault in production) signs `sha256(url + body)` as hex DER and `X-Identity` carries the compressed public key, exactly the official SDK key utilities; the wire shape follows the official API (decimal major-unit `price`/`amountPaid`, the `merchant/invoice` facade envelope, the `token` create-body field, `posData` as the network carrier) - the initial 17.5 approximation of integer minor units, a flat body and a base64 signature was disproved by the 17.8 security review and realigned here and in the mock (cbl-mock-gateway@808c38b); the mock only checks header presence (T-MOCK-06) | the only adapter that can authenticate against the real BitPay; the unit suite proves the scheme offline (hex DER parse, verify over url + body, compressed identity); no key material in fixtures, logs or error texts (E-1/E-10); the mocked stand now emulates the documented contract | a connector compromise exposes the merchant signing key; the exact `amountPaid` unit assumption (major decimal of the pricing currency) and the token transport on reads are validated only by the 17.16 sandbox run (KI-connector-10) | the key is a secret isolated to the adapter config and never rendered; a wrong key is a business rejection (`ErrRejected`, E-7) and never trips the breaker; the egress vault task moves signing behind a dedicated service |
+| T-CONNECTOR-19 | Payout pipeline (17.11): one enabled provider per payout is selected deterministically by the allowlist and capabilities (no cross-provider failover after submission, because a lost response could have created a payout elsewhere); the `provider_payouts` mapping is the replay barrier (the inbox covers exact redelivery, the payout id covers business retries and the advisory transaction lock serializes concurrent deliveries of one payout) and the status source (polling worker, CAS plus outbox in one transaction); business rejections become failed events with a fixed reason, temporary failures use the retry topics | the saga receives submitted/confirmed/failed with the provider and never sees double credits or double events; provider texts stay in logs | a crash between the provider call and the commit re-calls the provider: the recovery relies on provider-side dedupe by the platform payout id (the command reference: BTCPay pull-payment name, CoinGate `request_id`, BitPay `reference`) and the operator runbook; provider status polling is interval-based and a payout can stay submitted while an operator approves at the provider; the payout wire shapes remain provisional until the 17.16 sandbox runs; NOWPayments payout batches (JWT/TOTP) are H2; the admin disabled set is not consulted by the payout router yet (disable through the allowlist/restart, T-CONNECTOR-13) | KI-connector-11 records the polling limits; the provider dispatch layer (17.20) standardizes the composition; a lookup-based recovery is a candidate for 17.13/17.16 |
 
 ## 9. Known issues
 
@@ -181,6 +202,7 @@ consumer lag; dashboards after task 0.7.
 | KI-connector-08 | The admin path for routing rules was missing: `GET/PUT /admin/v1/routing-rules` (12.x) required a new gRPC contract in connector (cbl-protos), RBAC and audit; until then rules were changed by direct configuration replacement | there was no way to change rules in production without SQL | CLOSED 16.10.2026: `ConnectorAdminService` (cf-3.7) implemented in 12.2 (revision-based `PutRoutingRules`, `GetRoutingRules`, `DisableProvider`; migration 00004; RBAC and audit on the back-office side) | closed |
 | KI-connector-09 | No provider enable and no retention on `disabled_providers`: the table grows monotonically and a disabled provider can only be re-enabled by SQL | an erroneous or temporary disable requires manual DB work; the table grows without bounds | the `EnableProvider` RPC now exists in the contract (cf-4); implementation with RBAC and audit - 17.15; a retention/archive decision with 14.2 when the volume warrants it | open |
 | KI-connector-10 | BitPay details the official docs leave open are assumed: `amountPaid` is read as a decimal major-unit amount of the pricing currency, and the pairing token on reads is sent as a Bearer header (the create body always carries it) | a wrong assumption fails the 17.16 sandbox run loudly (the fetch path and the amount echo fail closed); no silent money movement | re-validated and fixed with the 17.0 account in the 17.16 sandbox run (the wire details are confined to `internal/providers/bitpay`) | open |
+| KI-connector-11 | Payout status is read by interval polling only (no payout webhooks/confirmations are wired); a payout waiting for a provider-side approval stays submitted; `provider_payouts` has no retention | resolution latency equals the polling interval; manual provider approval needs the operator; table growth | per-provider payout confirmations as their APIs expose them (17.16); retention with 14.2 | open |
 
 ## 10. Task journal
 
@@ -205,6 +227,7 @@ consumer lag; dashboards after task 0.7.
 | CBL-17.7 | 2026-10-17 | done, review closed (CoinGate adapter: `internal/providers/coingate` implements SPI v1 against the v2 API (orders create/get with the numeric id and the request-horizon expiry echo, order lookup, token-echo verification over the raw body via kit `webhooksig`, provisional payout/refund shapes owned by 17.11/17.12, statuses without fabrication); the shared provider-agnostic helper `internal/providers/wire.DecodeArrayOrObject` extracted at the second adapter (decision 21) and the BTCPay lookup refactored onto it; `CONNECTOR_COINGATE_*` wiring plus the `CONNECTOR_PROVIDERS` CSV allowlist selecting adapters (the e2e scenario selects one; an empty PowerShell env value deletes a variable, so the allowlist replaced the empty-BTpay-URL switch); conformance `Run` green for the coingate fixtures (CONF-1..CONF-10); cross-service scenario E2E_Connector_CoinGateProfile PASS (mark `20261017t074107z`); unit coverage total 87.0%, coingate package 83.3%, integration and e2e regression runs green, lint 0; the real CoinGate sandbox run needs the 17.0 account and moves to 17.16) | `.specs/CBL-17.7-coingate-adapter.md` | 6c04530 |
 | CBL-17.6 | 2026-10-17 | done, review closed (NOWPayments adapter: `internal/providers/nowpayments` implements SPI v1 against the NOWPayments API (hosted invoices with JSON-number amounts and the request-horizon expiry clamp, payment reads with the received evidence from `actually_paid` and the pay asset resolved by the exact configured network row, the envelope/array/object lookup, canonical JSON HMAC-SHA512 IPN verification via kit `webhooksig`, nine statuses without fabrication, the scale guard, create-network validation, provisional payout shapes; no Refunder, refunds are manual by decision 8); the manifest gained `fetch_mandatory` (the normalizer resolves NOW deliveries through the adapter) and every provider with a manifest bucket is now wrapped by `gateway.Limited` with the kit limiter (T-CONNECTOR-16, `Limited.Provider` added for the capability source); `CONNECTOR_NOWPAYMENTS_*` wiring through the allowlist; conformance `Run` green (CONF-1..CONF-10); E2E_Connector_NowPaymentsProfile PASS (mark `20261017t082057z`); unit coverage total 86.7%, nowpayments package 86.0%, integration and e2e regression runs green, lint 0; the real NOWPayments sandbox run needs the 17.0 account and moves to 17.16) | `.specs/CBL-17.6-nowpayments-adapter.md` | this commit |
 | CBL-17.8 | 2026-10-17 | done, review closed (BitPay adapter: `internal/providers/bitpay` implements SPI v1 against the official BitPay API v2 contract (invoice create/get with the `merchant/invoice` facade envelope and decimal major-unit amounts, the required `token` body field, `posData` as the network carrier, array-or-object order lookup, `x-signature` raw-HMAC base64 verification via kit `webhooksig`, statuses without fabrication, provisional payout/refund shapes); every request is ECDSA secp256k1-signed (hex DER `X-Signature` over url plus body, compressed-key `X-Identity`) with SEC1/PKCS8 PEM loading over the new dependency `decred/dcrd/dcrec/secp256k1/v4` (T-CONNECTOR-18; the unit suite verifies the signature offline per key form); the blocking security-review finding (the 17.5 wire approximation would have mispriced invoices against the real API) was closed by realigning the adapter, the mock profile (`cbl-mock-gateway@808c38b`), the fixtures and the manifest rate limit (official 100 invoices/hour, D5), plus guards for non-positive/negative amounts, provider amount echo, network rows, empty identifiers, base-URL fragments and caller HTTP clients; conformance `Run` green (CONF-1..CONF-10); E2E_Connector_BitPayProfile PASS 11/11 (mark `20261017t161450z`); unit coverage total 86.6%, bitpay package 85.4%, integration and e2e regression runs green, lint 0; the real BitPay sandbox run needs the 17.0 account and moves to 17.16 (KI-connector-10) | `.specs/CBL-17.8-bitpay-adapter.md` | this commit |
+| CBL-17.11 (increment 1, connector) | 2026-10-18 | done, review closed (payout pipeline H1: migration 00007 provider_payouts with the replay barrier and pending index; PayoutProcessor consumes payout.commands in the Guard transaction, validates untrusted commands, selects one enabled provider by CONNECTOR_PAYOUT_PROVIDERS and capabilities, records the mapping and publishes gateway.payout.events submitted with provider and gateway id; business rejections publish failed with a fixed reason, temporary failures retry; PayoutStatusWorker polls submitted rows, touches non-terminal ones and resolves confirmed/failed with CAS plus outbox in one transaction (exactly one publisher); main wires the second consumer and the worker; unit P-01..P-08, storage integration I-01..I-03, Kafka e2e E2E_Connector_PayoutPipeline green; coverage 86.9% unit+integration; NOW payouts H2 deferred; the payout-side provider propagation follows in cbl-payout) | `.specs/CBL-17.11-payout-pipeline.md` | this commit |
 
 ## 11. Runbook
 
@@ -289,7 +312,9 @@ BTCPay adapter (17.9):
    `InProgress` as submitted, `Completed` as confirmed, `Cancelled` as failed. A
    temporary failure of the second call can leave an orphan pull payment at the
    provider (E-11): dedupe by the pull payment name (the platform payout id)
-   before approving; the approval and execution flows arrive with 17.11/17.12.
+   before approving; the approval and execution flows are operated manually at
+   the provider: the connector payout pipeline (17.11) submits and polls the
+   payout, a provider-side approval keeps it submitted (KI-connector-11).
 6. Amounts of an asset outside `CONNECTOR_BTCPAY_CAPABILITIES` are rejected
    (`FailedPrecondition`): add the asset row (catalog 17.21 replaces the env).
 
@@ -323,8 +348,9 @@ NOWPayments adapter (17.6):
 4. The pay asset is resolved from `pay_currency` by the exact configured network
    row (`usdttrc20` -> `USDT`); an unmapped pay currency fails the fetch closed:
    add the capability row (catalog 17.21 replaces the configuration).
-5. Payouts are provisional: the JWT login and the TOTP batch confirmation are
-   17.11; a created payout is reported as submitted.
+5. Payouts are H2: the default `CONNECTOR_PAYOUT_PROVIDERS` excludes
+   NOWPayments until the JWT login and the TOTP batch confirmation land; the
+   provisional adapter shape is not selected by the pipeline.
 
 BitPay adapter (17.8):
 
@@ -347,6 +373,29 @@ BitPay adapter (17.8):
    any call and the returned price must echo the request); an asset outside the
    capabilities, a network row without a matching asset and a non-positive
    amount are rejected (catalog 17.21 replaces the configuration).
-5. Payouts/refunds are provisional shapes (17.11/17.12 own the real batch and
-   refund flows); the sandbox run of 17.16 re-validates them together with the
-   amountPaid unit assumption and the token transport (KI-connector-10).
+5. Payout/refund wire shapes are exercised by the payout pipeline (17.11); the
+   sandbox run of 17.16 re-validates them together with the amountPaid unit
+   assumption and the token transport (KI-connector-10).
+
+Payout pipeline (17.11):
+
+1. Logs `payout submitted to provider` (payout_id, provider, gateway_payout_id),
+   `payout command replayed`, `payout rejected by provider` and
+   `payout failed before submission`.
+2. DLQ `payout.commands.dlq`: the reason is in the `x-error` header; typical
+   reasons - an invalid command (payout id, amount, network, address,
+   idempotency key) or exhausted retries; fix the producer and replay manually.
+3. A payout stuck in submitted:
+   `SELECT provider, gateway_payout_id, state, updated_at FROM provider_payouts
+   WHERE payout_id = '...'`; the worker polls every
+   `CONNECTOR_PAYOUT_POLL_INTERVAL`; a provider-side approval (for example a
+   BTCPay pull payment) is manual; `payout status read failed` WARN means a
+   temporary read error and the row is polled again.
+4. `payout resolution failed` WARN: the CAS or the outbox write failed, the next
+   sweep retries; a resolved payout never publishes twice.
+5. A failed event without a `provider_payouts` row proves the payout never
+   reached the provider (no submission; the saga releases the hold); with a row
+   the provider reported the failure or the status read found no payout - check
+   the gateway before any manual reversal.
+
+

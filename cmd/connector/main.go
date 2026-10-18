@@ -346,6 +346,71 @@ func main() {
 			}
 		}()
 		log.Info("webhook normalizer started", zap.String("group", group))
+
+		// The payout pipeline (17.11): payout.commands -> adapter CreatePayout ->
+		// gateway.payout.events; the provider_payouts mapping is the replay
+		// barrier and the status worker polls the provider for the verdict.
+		payoutProviders := "btcpay,coingate,bitpay"
+		if raw, set := os.LookupEnv("CONNECTOR_PAYOUT_PROVIDERS"); set {
+			// A set-but-empty value is a deliberate full disable (fail closed).
+			payoutProviders = raw
+		}
+		payoutAllowed := make(map[string]bool)
+		for _, id := range splitCSV(payoutProviders) {
+			payoutAllowed[strings.ToLower(id)] = true
+		}
+		if payoutRouter, payoutErr := usecase.NewPayoutRouter(gateways, payoutAllowed); payoutErr != nil {
+			log.Warn("payout pipeline disabled", zap.Error(payoutErr))
+		} else {
+			payoutRepo := storage.NewProviderPayoutsRepository(db)
+			payoutProcessor := usecase.NewPayoutProcessor(payoutRouter, payoutRepo, outbox.NewStore(), log)
+			payoutGroup := getenv("CONNECTOR_PAYOUT_CONSUMER_GROUP", usecase.ConsumerGroupPayouts)
+			payoutInbox := inbox.NewProcessor(payoutGroup, db, inbox.NewGuard(), payoutProcessor, publisher,
+				inbox.NewRouter(usecase.TopicPayoutCommands, 3), log)
+			payoutTopics := []string{
+				usecase.TopicPayoutCommands,
+				usecase.TopicPayoutCommands + inbox.RetrySuffix5s,
+				usecase.TopicPayoutCommands + inbox.RetrySuffix1m,
+				usecase.TopicPayoutCommands + inbox.RetrySuffix10m,
+			}
+			payoutRunner, payoutRunErr := kafkaconsumer.New(brokerList, payoutGroup, payoutTopics, payoutInbox, log)
+			if payoutRunErr != nil {
+				log.Error("payout consumer failed", zap.Error(payoutRunErr))
+				return
+			}
+			defer payoutRunner.Close()
+			go func() {
+				if consumeErr := payoutRunner.Run(ctx); consumeErr != nil && !errors.Is(consumeErr, context.Canceled) {
+					log.Error("payout consumer stopped", zap.Error(consumeErr))
+				}
+			}()
+			payoutInterval := 30 * time.Second
+			if raw, set := os.LookupEnv("CONNECTOR_PAYOUT_POLL_INTERVAL"); set {
+				// Zero disables the worker; other values are clamped to >= 1s.
+				if parsed, parseErr := time.ParseDuration(strings.TrimSpace(raw)); parseErr != nil {
+					log.Warn("invalid CONNECTOR_PAYOUT_POLL_INTERVAL: using the default", zap.String("value", raw))
+				} else {
+					payoutInterval = parsed
+				}
+			}
+			if payoutInterval < 0 {
+				payoutInterval = 0
+			}
+			if payoutInterval > 0 && payoutInterval < time.Second {
+				payoutInterval = time.Second
+			}
+			if payoutInterval > 0 {
+				worker := usecase.NewPayoutStatusWorker(db, gateways, payoutRepo, outbox.NewStore(), payoutInterval, 100, log)
+				go func() {
+					if runErr := worker.Run(ctx); runErr != nil && !errors.Is(runErr, context.Canceled) {
+						log.Error("payout status worker stopped", zap.Error(runErr))
+					}
+				}()
+			} else {
+				log.Warn("payout status polling disabled by a non-positive CONNECTOR_PAYOUT_POLL_INTERVAL")
+			}
+			log.Info("payout pipeline started", zap.String("group", payoutGroup))
+		}
 	} else {
 		log.Warn("KAFKA_BROKERS is empty: webhook normalizer disabled")
 	}

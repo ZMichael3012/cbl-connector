@@ -461,4 +461,43 @@ Provider exports (17.13):
    silently (KI-connector-13): reconciliation windows and the reconciler
    dedup absorb the gap until the 17.16 sandbox runs validate the behavior.
 
+## 12. Sandbox providers (E17 test stands, 19.10.2026)
+
+- Local secrets: the repository-root `.env` (gitignored) carries the CoinGate,
+  NOWPayments and BitPay sandbox keys, the capability rows and the proxy
+  variables; the BitPay signing key lives at `deploy/bitpay-test-key.pem`
+  (`*.pem` is gitignored) and its PEM content is injected at run time as
+  `CONNECTOR_BITPAY_PRIVATE_KEY_PEM`.
+- CoinGate sandbox (`https://api-sandbox.coingate.com/v2`): the stand IP is
+  Cloudflare-blocked, so every CoinGate call must go through the local NL
+  proxy (exit `72.56.22.194`, allowlisted in the CoinGate API app): run the
+  connector with `HTTPS_PROXY=http://host.docker.internal:12334` (the Go
+  default transport honors it; `NO_PROXY` keeps internal hosts direct). The
+  IPN token is our own generated secret; after the KI-connector-14 fix the
+  adapter sends it as the order `token`.
+- NOWPayments sandbox (`https://api-sandbox.nowpayments.io/v1`): reachable
+  directly; creation and `GET /v1/payment/{payment_id}` work with the API key,
+  the list/lookup endpoints need a Bearer JWT (deferred, KI-connector-15).
+- BitPay test (`https://test.bitpay.com`): the merchant token is paired to our
+  SIN (`Tf1igmSC8spXhUrXeiYKjRNVnPiRjDtMqFF`, derived from the key with the
+  official BitAuth algorithm) and approved in Payment Tools -> API Tokens.
+  Mock pay without testnet coins: create the invoice with
+  `buyerProvidedInfo.selectedWallet=bitpay` and
+  `selectedTransactionCurrency=BTC`, then `PUT /invoices/{id}` with
+  `status=paid`.
+- Webhooks need a public URL; the cloudflared quick tunnel needs no account:
+  `curl.exe -L -o %TEMP%\opencode\cloudflared.exe https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe`
+  then `%TEMP%\opencode\cloudflared.exe tunnel --url http://localhost:8060`;
+  the printed `https://<random>.trycloudflare.com` maps to the ingress and the
+  provider webhook URL is `https://<host>/hooks/<provider>/<endpoint_id>`
+  (any id on the dev stand; the URL is ephemeral).
+- Run order: (1) the ingress stand with the provider override (ingress
+  AGENTS.md section 12); (2) the connector stand with the sandbox `.env` and
+  the proxy; (3) the tunnel and the provider dashboards (NOW Webhook URL,
+  CoinGate per-order `callback_url`, BitPay `notificationURL`); (4) a test
+  invoice through the connector and a payment (BTCPay regtest, BitPay mock
+  pay, NOW/CoinGate sandbox).
+- The sandbox runs are the 17.26 account-gated acceptance; the wire gaps found
+  so far are KI-connector-14 (CoinGate) and KI-connector-15 (NOWPayments).
+
 

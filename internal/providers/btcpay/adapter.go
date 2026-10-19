@@ -279,6 +279,14 @@ func (a *Adapter) statusOf(gatewayID string, decoded invoiceResponse) (domain.Pa
 		}
 		received = paid
 	}
+	confirmations := uint32(0)
+	if state == domain.StateConfirmed {
+		// A Greenfield invoice carries no confirmation counter: Settled means
+		// the provider depth was reached, so the canonical status carries our
+		// configured depth (the capability row) and the payment rules complete
+		// (found by the M1 run, 19.10.2026).
+		confirmations = a.confirmationDepthFor(decoded.Currency)
+	}
 	eventTS := time.Time{}
 	if decoded.CreatedTime > 0 {
 		eventTS = time.Unix(decoded.CreatedTime, 0).UTC()
@@ -289,6 +297,7 @@ func (a *Adapter) statusOf(gatewayID string, decoded invoiceResponse) (domain.Pa
 		State:          state,
 		RawStatus:      decoded.Status,
 		ReceivedAmount: received,
+		Confirmations:  confirmations,
 		GatewayEventTS: eventTS,
 	}, nil
 }
@@ -478,6 +487,18 @@ func (a *Adapter) decimalsFor(asset string) (uint32, error) {
 		return 0, fmt.Errorf("%w: asset %q is outside the configured capabilities", domain.ErrRejected, asset)
 	}
 	return scale, nil
+}
+
+// confirmationDepthFor returns the configured confirmation depth of an asset;
+// an unknown asset answers zero (the caller keeps the provider evidence).
+func (a *Adapter) confirmationDepthFor(asset string) uint32 {
+	needle := strings.ToUpper(strings.TrimSpace(asset))
+	for _, network := range a.capabilities.Networks {
+		if strings.ToUpper(strings.TrimSpace(network.Asset)) == needle {
+			return network.ConfirmationDepth
+		}
+	}
+	return 0
 }
 
 // ensureAmountScale rejects an amount whose scale differs from the configured

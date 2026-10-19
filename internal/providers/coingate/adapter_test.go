@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -42,7 +43,7 @@ func testConfig(baseURL string) coingate.Config {
 // orderBody renders a CoinGate order response.
 func orderBody(id int, status string) string {
 	return `{"id":` + strconv.Itoa(id) + `,"status":"` + status + `","order_id":"order-1",` +
-		`"price_amount":"12.340000","price_currency":"USDT","pay_amount":"12.340000","pay_currency":"USDT_TRC20",` +
+		`"price_amount":"12.34","price_currency":"USD","pay_amount":"12.340000","pay_currency":"USDT_TRC20",` +
 		`"payment_address":"MOCKADDR","created_at":"2026-10-17T12:00:00Z"}`
 }
 
@@ -84,6 +85,10 @@ func TestNewValidation(t *testing.T) {
 		"missing token":     func(c *coingate.Config) { c.APIToken = "" },
 		"missing ipn token": func(c *coingate.Config) { c.IPNToken = nil },
 		"no networks":       func(c *coingate.Config) { c.Capabilities = domain.Capabilities{} },
+		"stablecoin price currency": func(c *coingate.Config) {
+			c.PriceCurrency = "USDT"
+		},
+		"non-letter price currency": func(c *coingate.Config) { c.PriceCurrency = "1$A" },
 	}
 	for name, mutate := range cases {
 		mutate := mutate
@@ -144,8 +149,10 @@ func TestCreateInvoiceHappyPath(t *testing.T) {
 	var sent map[string]any
 	require.NoError(t, json.Unmarshal([]byte(captured.body), &sent))
 	assert.Equal(t, "order-1", sent["order_id"])
-	assert.Equal(t, "12.340000", sent["price_amount"])
-	assert.Equal(t, "USDT", sent["price_currency"])
+	assert.Equal(t, "12.34", sent["price_amount"],
+		"the stablecoin amount is rendered as the fiat price at par (T-CONNECTOR-27)")
+	assert.Equal(t, "USD", sent["price_currency"],
+		"CoinGate rejects stablecoins as price currencies: the order is fiat-priced at par (T-CONNECTOR-27)")
 	assert.Equal(t, "USDT_TRC20", sent["pay_currency"], "the pay currency is the uppercased request network")
 	assert.Equal(t, "ipn-token", sent["token"], "the configured IPN token is sent so CoinGate echoes it back")
 	assert.Equal(t, "CBL payment", sent["title"])
@@ -164,8 +171,8 @@ func TestCreateInvoiceHostedCheckout(t *testing.T) {
 	t.Parallel()
 	server := wireServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"id":1043,"status":"new","order_id":"order-1","price_amount":"12.340000",` +
-			`"price_currency":"USDT","pay_currency":"USDT_TRC20","payment_url":"https://pay.coingate.com/inv/1043",` +
+		_, _ = w.Write([]byte(`{"id":1043,"status":"new","order_id":"order-1","price_amount":"12.34",` +
+			`"price_currency":"USD","pay_currency":"USDT_TRC20","payment_url":"https://pay.coingate.com/inv/1043",` +
 			`"created_at":"2026-10-17T12:00:00Z"}`))
 	})
 	adapter, err := coingate.New(testConfig(server.URL))
@@ -199,6 +206,154 @@ func TestCreateInvoiceCallbackURL(t *testing.T) {
 	assert.Equal(t, "https://hooks.example.test/hooks/coingate/stand", sent["callback_url"],
 		"the per-order callback URL points callbacks at our ingress")
 	assert.Equal(t, "ipn-token", sent["token"])
+}
+
+func TestCreateInvoicePriceCurrency(t *testing.T) {
+	t.Parallel()
+
+	var captured string
+	server := wireServer(t, func(w http.ResponseWriter, r *http.Request) {
+		captured = readBody(t, r)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":1044,"status":"new","order_id":"order-1","price_amount":"12.34",` +
+			`"price_currency":"USD","pay_currency":"USDT_TRC20","created_at":"2026-10-17T12:00:00Z"}`))
+	})
+	fiat := testConfig(server.URL)
+	fiat.Capabilities.Networks = map[string]domain.NetworkCapability{
+		"usd": {Asset: "USD", MinAmount: money.MustParse("1", "USD", 2)},
+	}
+	adapter, err := coingate.New(fiat)
+	require.NoError(t, err)
+
+	request := createRequest()
+	request.Amount = money.MustParse("12.34", "USD", 2)
+	request.Network = "usd"
+	invoice, err := adapter.CreateInvoice(context.Background(), request)
+	require.NoError(t, err)
+
+	var sent map[string]any
+	require.NoError(t, json.Unmarshal([]byte(captured), &sent))
+	assert.Equal(t, "USD", sent["price_currency"], "a fiat asset prices itself")
+	assert.Equal(t, int64(1234), invoice.Amount.MinorUnits)
+
+	// A non-stablecoin asset cannot be priced in fiat without a rate.
+	eth := testConfig("http://example.test")
+	eth.Capabilities.Networks = map[string]domain.NetworkCapability{
+		"eth": {Asset: "ETH", MinAmount: money.MustParse("0.01", "ETH", 8)},
+	}
+	ethAdapter, err := coingate.New(eth)
+	require.NoError(t, err)
+	_, err = ethAdapter.CreateInvoice(context.Background(), domain.CreateInvoiceRequest{
+		IdempotencyKey: "k-eth",
+		PaymentID:      "order-1",
+		Amount:         money.MustParse("0.01", "ETH", 8),
+		Network:        "eth",
+		ExpiresAt:      time.Now().UTC().Add(15 * time.Minute),
+	})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, domain.ErrRejected), "a rate is not wired yet: %v", err)
+}
+
+func TestCreateInvoicePriceCurrencyMismatch(t *testing.T) {
+	t.Parallel()
+	server := wireServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":1042,"status":"new","order_id":"order-1","price_amount":"12.34",` +
+			`"price_currency":"EUR","pay_currency":"USDT_TRC20","created_at":"2026-10-17T12:00:00Z"}`))
+	})
+	adapter, err := coingate.New(testConfig(server.URL))
+	require.NoError(t, err)
+
+	_, err = adapter.CreateInvoice(context.Background(), createRequest())
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, domain.ErrRejected),
+		"the provider must echo the configured price currency: %v", err)
+}
+
+func TestCreateInvoicePriceRendering(t *testing.T) {
+	t.Parallel()
+
+	// Half-up rounding to cents and the platform amount preserved.
+	var captured string
+	server := wireServer(t, func(w http.ResponseWriter, r *http.Request) {
+		captured = readBody(t, r)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":1045,"status":"new","order_id":"order-1","price_amount":"12.35",` +
+			`"price_currency":"USD","pay_currency":"USDT_TRC20","created_at":"2026-10-17T12:00:00Z"}`))
+	})
+	adapter, err := coingate.New(testConfig(server.URL))
+	require.NoError(t, err)
+	request := createRequest()
+	request.Amount = money.Money{MinorUnits: 12345000, Asset: "USDT", Decimals: 6}
+	invoice, err := adapter.CreateInvoice(context.Background(), request)
+	require.NoError(t, err)
+	var sent map[string]any
+	require.NoError(t, json.Unmarshal([]byte(captured), &sent))
+	assert.Equal(t, "12.35", sent["price_amount"], "the par price rounds half-up to cents")
+	assert.Equal(t, int64(12345000), invoice.Amount.MinorUnits, "the platform amount stays the expected amount")
+
+	// A drifted provider price is rejected.
+	drift := wireServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":1046,"status":"new","order_id":"order-1","price_amount":"12.36",` +
+			`"price_currency":"USD","pay_currency":"USDT_TRC20","created_at":"2026-10-17T12:00:00Z"}`))
+	})
+	adapter, err = coingate.New(testConfig(drift.URL))
+	require.NoError(t, err)
+	_, err = adapter.CreateInvoice(context.Background(), createRequest())
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, domain.ErrRejected), "a price drift must be rejected: %v", err)
+
+	// An amount that cannot be converted without overflow is rejected before
+	// any provider call.
+	calls := 0
+	overflow := wireServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusCreated)
+	})
+	adapter, err = coingate.New(testConfig(overflow.URL))
+	require.NoError(t, err)
+	request = createRequest()
+	request.Amount = money.Money{MinorUnits: math.MaxInt64, Asset: "USDT", Decimals: 6}
+	_, err = adapter.CreateInvoice(context.Background(), request)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, domain.ErrRejected), "an overflow must fail closed: %v", err)
+	assert.Zero(t, calls, "the rejection happens before any provider call")
+}
+
+func TestCreateInvoicePriceUpscale(t *testing.T) {
+	t.Parallel()
+
+	var captured string
+	server := wireServer(t, func(w http.ResponseWriter, r *http.Request) {
+		captured = readBody(t, r)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":1047,"status":"new","order_id":"order-1","price_amount":"1234.50",` +
+			`"price_currency":"JPY","pay_currency":"USDT_TRC20","created_at":"2026-10-17T12:00:00Z"}`))
+	})
+	config := testConfig(server.URL)
+	config.PriceCurrency = "JPY"
+	config.Capabilities.Networks = map[string]domain.NetworkCapability{
+		"jpy": {Asset: "JPY", MinAmount: money.MustParse("1.0", "JPY", 1)},
+	}
+	adapter, err := coingate.New(config)
+	require.NoError(t, err)
+
+	request := createRequest()
+	request.Amount = money.MustParse("1234.5", "JPY", 1)
+	request.Network = "jpy"
+	_, err = adapter.CreateInvoice(context.Background(), request)
+	require.NoError(t, err)
+
+	var sent map[string]any
+	require.NoError(t, json.Unmarshal([]byte(captured), &sent))
+	assert.Equal(t, "1234.50", sent["price_amount"], "a sub-cent-scale fiat asset is upscaled to the price scale")
+
+	// The upscale is overflow-checked as well.
+	request.Amount = money.Money{MinorUnits: math.MaxInt64, Asset: "JPY", Decimals: 1}
+	_, err = adapter.CreateInvoice(context.Background(), request)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, domain.ErrRejected), "an upscale overflow must fail closed: %v", err)
 }
 
 func TestCreateInvoiceErrorClassification(t *testing.T) {

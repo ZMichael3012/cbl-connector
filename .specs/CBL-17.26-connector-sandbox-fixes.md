@@ -84,6 +84,7 @@ BitPay request transport (after):
 | T-CONNECTOR-24 | BitPay token transport: body for POST/PUT, query for GET, `Authorization` dropped (verified live 19.10.2026) | KI-connector-10: Bearer reads resolve to the public/user facade and fail; the signature must cover the URL including the token parameter |
 | T-CONNECTOR-25 | CoinGate export window: `created_at[from]`/`created_at[to]` + `sort=created_at_asc` | KI-connector-14(4): the API ignores `from`/`to`; the ascending walk keeps the offset cursor stable; the window becomes whole-day granular and the reconciler dedup `(provider, gateway_id)` absorbs the overlap |
 | T-CONNECTOR-26 | The BitPay sandbox buyer contact is env-gated (`CONNECTOR_BITPAY_BUYER_EMAIL`): it adds `buyer.email` and the forced wallet/currency (asset of the request) to the create body | mock pay requires a contact email and preselected wallet/currency; production behavior must not preselect the buyer's wallet |
+| T-CONNECTOR-27 | CoinGate orders are fiat-priced (found live in increment B: the API rejects stablecoins as `price_currency`, 422 "Price currency USDT is not supported"): the configured price currency prices itself, a known stablecoin is priced at par in `CONNECTOR_COINGATE_PRICE_CURRENCY` (default USD) rounded half-up to cents, any other asset is rejected; the provider price echo is compared at the fiat scale | CoinGate has no crypto price currencies, so a stablecoin invoice must be represented as its fiat value; the platform amount stays the expected amount and the received evidence comes from the USDT pay side | the par approximation ignores the stablecoin/fiat spread and rounds to cents (a non-round amount lands as under/overpaid, absorbed by the 17.10 rules); a real rate conversion belongs to the 17.14/quote follow-up | unit tests pin the rendered price, the echo drift rejection and the non-stablecoin rejection; the sandbox run validates the real order |
 
 ## 5. Error taxonomy
 
@@ -117,6 +118,9 @@ Unit matrix (red first, then implementation):
 | BT-02 | BTCPay VerifyWebhook with type `InvoiceCreated` | error, no event |
 | SEC-01 | Provider error excerpt echoing the request URI/token (BitPay GET, CoinGate create) | the configured secrets are redacted from the error text (`providers/wire.Redact`) |
 | SEC-02 | BitPay config with the sandbox buyer email on a BitPay production host | configuration error (fails closed) |
+| CG-07 | CoinGate create with a stablecoin asset (increment B finding) | the body carries the fiat `price_currency` and the amount rendered at par to cents; a fiat asset prices itself |
+| CG-08 | CoinGate create with a non-stablecoin asset (no rate wired) | business rejection before any provider call |
+| CG-09 | CoinGate response price currency or price amount drifting from the rendered price | business rejection |
 | TR-01 | `GetGatewayPayment` with a pending-state gateway | status PENDING on the wire |
 | TR-02 | `ListGatewayPayments` with a pending export row | status PENDING on the wire |
 | NF-01 | Fetch returns pending | temporary error; no outbox envelope |

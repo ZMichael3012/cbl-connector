@@ -170,12 +170,13 @@ func main() {
 			return
 		}
 		adapter, adapterErr := coingate.New(coingate.Config{
-			BaseURL:      base,
-			APIToken:     os.Getenv("CONNECTOR_COINGATE_API_TOKEN"),
-			IPNToken:     []byte(os.Getenv("CONNECTOR_COINGATE_IPN_TOKEN")),
-			CallbackURL:  os.Getenv("CONNECTOR_COINGATE_CALLBACK_URL"),
-			Capabilities: capabilities,
-			Timeout:      durationEnv(log, "CONNECTOR_COINGATE_TIMEOUT", 10*time.Second),
+			BaseURL:       base,
+			APIToken:      os.Getenv("CONNECTOR_COINGATE_API_TOKEN"),
+			IPNToken:      []byte(os.Getenv("CONNECTOR_COINGATE_IPN_TOKEN")),
+			CallbackURL:   os.Getenv("CONNECTOR_COINGATE_CALLBACK_URL"),
+			PriceCurrency: os.Getenv("CONNECTOR_COINGATE_PRICE_CURRENCY"),
+			Capabilities:  capabilities,
+			Timeout:       durationEnv(log, "CONNECTOR_COINGATE_TIMEOUT", 10*time.Second),
 		})
 		if adapterErr != nil {
 			log.Error("build coingate adapter failed", zap.Error(adapterErr))

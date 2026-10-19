@@ -227,7 +227,7 @@ func coinGateFixtures() ProfileFixtures {
 		Provider:         "coingate",
 		CreatePath:       "POST /v2/orders",
 		CreateStatus:     201,
-		CreateTemplate:   []byte(`{"id":1042,"status":"new","order_id":{{request.order_id}},"price_amount":"12.340000","price_currency":"USDT","pay_amount":"12.340000","pay_currency":"usdt_trc20","payment_address":"MOCKADDR","created_at":"2026-10-17T12:00:00Z"}`),
+		CreateTemplate:   []byte(`{"id":1042,"status":"new","order_id":{{request.order_id}},"price_amount":"12.34","price_currency":"USD","pay_amount":"12.340000","pay_currency":"usdt_trc20","payment_address":"MOCKADDR","created_at":"2026-10-17T12:00:00Z"}`),
 		CreateGatewayID:  gatewayID,
 		OrderField:       "order_id",
 		PaymentPath:      "GET /v2/orders/{gateway_id}",

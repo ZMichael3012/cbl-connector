@@ -34,6 +34,16 @@ func TestCanonicalState(t *testing.T) {
 	require.ErrorIs(t, err, domain.ErrUnknownState)
 }
 
+func TestStatePendingIsReadOnly(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, domain.State("pending"), domain.StatePending)
+	state, err := domain.CanonicalState("pending")
+	require.NoError(t, err)
+	assert.Equal(t, domain.StateDetected, state,
+		"the mock alias map keeps pending as detected: the sandbox contract is untouched (T-CONNECTOR-02)")
+}
+
 func TestCanonicalPayoutState(t *testing.T) {
 	t.Parallel()
 

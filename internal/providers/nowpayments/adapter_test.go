@@ -330,7 +330,7 @@ func TestCreateInvoiceErrorClassification(t *testing.T) {
 func TestGetPaymentStatusMapping(t *testing.T) {
 	t.Parallel()
 	cases := map[string]domain.State{
-		"waiting":        domain.StateDetected,
+		"waiting":        domain.StatePending,
 		"confirming":     domain.StateDetected,
 		"confirmed":      domain.StateDetected,
 		"sending":        domain.StateDetected,
@@ -416,6 +416,11 @@ func TestVerifyWebhookCanonicalJSON(t *testing.T) {
 	_, err = adapter.VerifyWebhook(map[string][]string{"x-nowpayments-sig": {signIPN(t, secret, unknown)}}, []byte(unknown))
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, domain.ErrUnknownState), "an unknown status must not be mapped")
+
+	pending := strings.Replace(body, `"payment_status":"finished"`, `"payment_status":"waiting"`, 1)
+	_, err = adapter.VerifyWebhook(map[string][]string{"x-nowpayments-sig": {signIPN(t, secret, pending)}}, []byte(pending))
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, domain.ErrInvalidWebhook), "a pre-deposit status carries no event")
 }
 
 func TestLookupByOrderID(t *testing.T) {
@@ -439,7 +444,7 @@ func TestLookupByOrderID(t *testing.T) {
 	require.NoError(t, err)
 	status, err = adapter.LookupByOrderID(context.Background(), "order-1")
 	require.NoError(t, err)
-	assert.Equal(t, domain.StateDetected, status.State)
+	assert.Equal(t, domain.StatePending, status.State)
 
 	objectWire := wireServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(paymentBody("partially_paid", 5)))

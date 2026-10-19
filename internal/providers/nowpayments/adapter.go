@@ -377,9 +377,10 @@ func (a *Adapter) exportStatusOf(decoded paymentResponse) domain.PaymentStatus {
 	return status
 }
 
-// paymentStates maps NOWPayments statuses to canonical states.
+// paymentStates maps NOWPayments statuses to canonical states; `waiting` is a
+// pre-deposit status and maps to pending (KI-connector-14).
 var paymentStates = map[string]domain.State{
-	"waiting":        domain.StateDetected,
+	"waiting":        domain.StatePending,
 	"confirming":     domain.StateDetected,
 	"confirmed":      domain.StateDetected,
 	"sending":        domain.StateDetected,
@@ -542,7 +543,7 @@ func (a *Adapter) request(ctx context.Context, method, path string, body any, no
 	case response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= http.StatusInternalServerError:
 		return nil, fmt.Errorf("%w: provider status %d", domain.ErrTemporary, response.StatusCode)
 	case response.StatusCode >= http.StatusBadRequest:
-		return nil, fmt.Errorf("%w: provider status %d: %s", domain.ErrRejected, response.StatusCode, truncateText(payload))
+		return nil, fmt.Errorf("%w: provider status %d: %s", domain.ErrRejected, response.StatusCode, truncateText(providerwire.Redact(payload, a.apiKey)))
 	default:
 		return payload, nil
 	}

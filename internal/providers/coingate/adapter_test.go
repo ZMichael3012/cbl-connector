@@ -147,6 +147,10 @@ func TestCreateInvoiceHappyPath(t *testing.T) {
 	assert.Equal(t, "12.340000", sent["price_amount"])
 	assert.Equal(t, "USDT", sent["price_currency"])
 	assert.Equal(t, "USDT_TRC20", sent["pay_currency"], "the pay currency is the uppercased request network")
+	assert.Equal(t, "ipn-token", sent["token"], "the configured IPN token is sent so CoinGate echoes it back")
+	assert.Equal(t, "CBL payment", sent["title"])
+	assert.Equal(t, "order-1", sent["description"])
+	assert.NotContains(t, sent, "callback_url", "without a configured callback URL the field is omitted")
 
 	assert.Equal(t, "1042", invoice.GatewayID, "the numeric order id becomes a decimal string")
 	assert.Equal(t, "coingate", invoice.Provider)
@@ -154,6 +158,47 @@ func TestCreateInvoiceHappyPath(t *testing.T) {
 	assert.Equal(t, "USDT_TRC20", invoice.Network)
 	assert.Equal(t, int64(12340000), invoice.Amount.MinorUnits)
 	assert.Equal(t, request.ExpiresAt, invoice.ExpiresAt, "CoinGate orders carry no expiry: the request horizon is echoed")
+}
+
+func TestCreateInvoiceHostedCheckout(t *testing.T) {
+	t.Parallel()
+	server := wireServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":1043,"status":"new","order_id":"order-1","price_amount":"12.340000",` +
+			`"price_currency":"USDT","pay_currency":"USDT_TRC20","payment_url":"https://pay.coingate.com/inv/1043",` +
+			`"created_at":"2026-10-17T12:00:00Z"}`))
+	})
+	adapter, err := coingate.New(testConfig(server.URL))
+	require.NoError(t, err)
+
+	invoice, err := adapter.CreateInvoice(context.Background(), createRequest())
+	require.NoError(t, err)
+	assert.Equal(t, "https://pay.coingate.com/inv/1043", invoice.CheckoutURL,
+		"the hosted checkout page is the destination when no address is issued")
+	assert.Empty(t, invoice.Address)
+}
+
+func TestCreateInvoiceCallbackURL(t *testing.T) {
+	t.Parallel()
+	var captured string
+	server := wireServer(t, func(w http.ResponseWriter, r *http.Request) {
+		captured = readBody(t, r)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(orderBody(1042, "new")))
+	})
+	config := testConfig(server.URL)
+	config.CallbackURL = "https://hooks.example.test/hooks/coingate/stand"
+	adapter, err := coingate.New(config)
+	require.NoError(t, err)
+
+	_, err = adapter.CreateInvoice(context.Background(), createRequest())
+	require.NoError(t, err)
+
+	var sent map[string]any
+	require.NoError(t, json.Unmarshal([]byte(captured), &sent))
+	assert.Equal(t, "https://hooks.example.test/hooks/coingate/stand", sent["callback_url"],
+		"the per-order callback URL points callbacks at our ingress")
+	assert.Equal(t, "ipn-token", sent["token"])
 }
 
 func TestCreateInvoiceErrorClassification(t *testing.T) {
@@ -197,10 +242,28 @@ func TestCreateInvoiceErrorClassification(t *testing.T) {
 	assert.True(t, errors.Is(err, domain.ErrTemporary), "a transport failure is temporary: %v", err)
 }
 
+func TestProviderErrorBodyDoesNotLeakSecrets(t *testing.T) {
+	t.Parallel()
+	server := wireServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		//nolint:gosec // G705: a test wire server echoing its own request URI to simulate a WAF page.
+		_, _ = w.Write([]byte(`{"error":"blocked ` + r.URL.RequestURI() + ` body token ipn-token api ` + testToken + `"}`))
+	})
+	adapter, err := coingate.New(testConfig(server.URL))
+	require.NoError(t, err)
+
+	_, err = adapter.CreateInvoice(context.Background(), createRequest())
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, domain.ErrRejected))
+	assert.NotContains(t, err.Error(), "ipn-token", "the IPN token must not leak (security review 17.26): %v", err)
+	assert.NotContains(t, err.Error(), testToken, "the API token must not leak: %v", err)
+	assert.Contains(t, err.Error(), "[redacted]")
+}
+
 func TestGetPaymentStatusMapping(t *testing.T) {
 	t.Parallel()
 	cases := map[string]domain.State{
-		"new":        domain.StateDetected,
+		"new":        domain.StatePending,
 		"pending":    domain.StateDetected,
 		"confirming": domain.StateDetected,
 		"paid":       domain.StateConfirmed,
@@ -349,6 +412,11 @@ func TestVerifyWebhookTokenEcho(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, domain.ErrUnknownState), "an unknown status must not be mapped: %v", err)
 
+	pending := strings.Replace(body, `"status":"paid"`, `"status":"new"`, 1)
+	_, err = adapter.VerifyWebhook(nil, []byte(pending))
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, domain.ErrInvalidWebhook), "a pre-deposit status carries no event: %v", err)
+
 	_, err = adapter.VerifyWebhook(nil, []byte(body+" trailing"))
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, domain.ErrUnsignedWebhook), "trailing data is malformed: %v", err)
@@ -374,7 +442,7 @@ func TestLookupByOrderID(t *testing.T) {
 	require.NoError(t, err)
 	status, err = adapter.LookupByOrderID(context.Background(), "order-1")
 	require.NoError(t, err)
-	assert.Equal(t, domain.StateDetected, status.State)
+	assert.Equal(t, domain.StatePending, status.State)
 
 	emptyWire := wireServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("[]"))

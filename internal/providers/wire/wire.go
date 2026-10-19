@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"strings"
 )
 
 // DecodeArrayOrObject decodes a provider body that may be a JSON array or a
@@ -36,6 +38,23 @@ func DecodeArrayOrObject[T any](payload []byte, notFound error) (T, error) {
 		return zero, fmt.Errorf("providers/wire: decode object: %w", err)
 	}
 	return single, nil
+}
+
+// Redact removes configured secrets (raw and URL-encoded) from an untrusted
+// provider excerpt so a hostile or misconfigured endpoint that echoes the
+// request cannot leak a token into logs or DLQ texts (security review 17.26).
+func Redact(payload []byte, secrets ...string) []byte {
+	text := string(payload)
+	for _, secret := range secrets {
+		if secret == "" {
+			continue
+		}
+		text = strings.ReplaceAll(text, secret, "[redacted]")
+		if encoded := url.QueryEscape(secret); encoded != secret {
+			text = strings.ReplaceAll(text, encoded, "[redacted]")
+		}
+	}
+	return []byte(text)
 }
 
 // DecodeEnvelopeOrArray decodes a provider list body that may be a bare JSON

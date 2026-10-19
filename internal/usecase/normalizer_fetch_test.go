@@ -139,6 +139,21 @@ func TestFetchCanonicalBuildsFromStatus(t *testing.T) {
 	require.NoError(t, event.Validate())
 }
 
+func TestFetchCanonicalPendingRetries(t *testing.T) {
+	t.Parallel()
+	fetcher := &fakeFetcher{status: domain.PaymentStatus{
+		PaymentID: "018f8f5c-3f7a-7b2e-9c4d-2a1b3c4d5e6f",
+		State:     domain.StatePending,
+		RawStatus: "new",
+	}}
+	normalizer := newFetchNormalizer(t, nil, fetcher)
+	raw := &eventsv1.GatewayWebhookRaw{Provider: "coingate", GatewayId: "order-1", FetchRequired: true}
+
+	_, err := normalizer.fetchCanonical(context.Background(), raw, "coingate")
+	require.ErrorIs(t, err, domain.ErrTemporary,
+		"a pre-deposit status retries instead of publishing an event (KI-connector-14)")
+}
+
 func TestFetchCanonicalOccurredAtFallback(t *testing.T) {
 	t.Parallel()
 	fetcher := &fakeFetcher{status: domain.PaymentStatus{

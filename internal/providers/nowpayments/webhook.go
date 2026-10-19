@@ -44,6 +44,11 @@ func (a *Adapter) VerifyWebhook(headers map[string][]string, rawBody []byte) (do
 	if !ok {
 		return domain.CanonicalEvent{}, fmt.Errorf("%w: ipn status %q", domain.ErrUnknownState, decoded.PaymentStatus)
 	}
+	if state == domain.StatePending {
+		// A pre-deposit IPN carries no payment event; the fetch-mandatory path
+		// re-reads the payment later (KI-connector-14).
+		return domain.CanonicalEvent{}, fmt.Errorf("%w: ipn status %q carries no deposit", domain.ErrInvalidWebhook, decoded.PaymentStatus)
+	}
 	occurredAt := time.Now().UTC()
 	if decoded.UpdatedAt != "" {
 		if parsed, err := time.Parse(time.RFC3339, decoded.UpdatedAt); err == nil {

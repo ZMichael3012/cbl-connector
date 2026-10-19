@@ -47,7 +47,7 @@ func TestExportPaymentsPage(t *testing.T) {
 	assert.Equal(t, uint32(6), first.Confirmations)
 	assert.Equal(t, time.UnixMilli(1792288200000).UTC(), first.GatewayEventTS)
 
-	assert.Equal(t, domain.StateDetected, page.Payments[1].State)
+	assert.Equal(t, domain.StatePending, page.Payments[1].State, "a new invoice is a pre-deposit status")
 	assert.Equal(t, domain.EncodeExportCursor(2), page.NextCursor)
 }
 

@@ -88,8 +88,8 @@ the compose stand covers the smoke and provider-profile scenarios.
    the answer must carry a 32-character lowercase hex `gatewayInvoiceId`,
    `provider` = `btcpay` and a non-empty `checkoutUrl`.
 3. Read back: `GetGatewayPayment` with `{"provider":"btcpay","gatewayId":"<id>"}`;
-   the answer must carry the canonical detected state (`DETECTED`) and
-   `rawStatus` = `New`.
+   the answer must carry the canonical pending state (`PENDING`) and
+   `rawStatus` = `New` (a pre-deposit status, KI-connector-14).
 4. Advance the mock invoice:
    `curl.exe -X POST http://localhost:8120/api/v1/simulate -H "Content-Type: application/json" -d @<file>`
    with `{"gateway_id":"<id>","provider":"btcpay","status":"confirmed"}`; the
@@ -114,7 +114,8 @@ the compose stand covers the smoke and provider-profile scenarios.
    the answer must carry a numeric `gatewayInvoiceId`, `provider` = `coingate`
    and a non-empty `address` (the payment address).
 3. Read back: `GetGatewayPayment` with `{"provider":"coingate","gatewayId":"<id>"}`
-   must answer the canonical detected state (`DETECTED`) and `rawStatus` = `new`.
+   must answer the canonical pending state (`PENDING`) and `rawStatus` = `new`
+   (a pre-deposit status, KI-connector-14).
 4. Advance the mock order: `POST http://localhost:8120/api/v1/simulate` with
    `{"gateway_id":"<id>","provider":"coingate","status":"confirmed"}`.
 5. Read again: the canonical confirmed state (`CONFIRMED`) with `rawStatus` = `paid`.
@@ -134,7 +135,8 @@ the compose stand covers the smoke and provider-profile scenarios.
    non-empty `checkoutUrl`.
 3. Read back: `GetGatewayPayment` with
    `{"provider":"nowpayments","gatewayId":"<id>"}` must answer the canonical
-   detected state (`DETECTED`) and `rawStatus` = `waiting`.
+   pending state (`PENDING`) and `rawStatus` = `waiting`
+   (a pre-deposit status, KI-connector-14).
 4. Advance the mock order: `POST http://localhost:8120/api/v1/simulate` with
    `{"gateway_id":"<id>","provider":"nowpayments","status":"confirmed"}`.
 5. Read again: the canonical confirmed state (`CONFIRMED`) with
@@ -159,7 +161,8 @@ the compose stand covers the smoke and provider-profile scenarios.
    the answer must carry the mock invoice id, `provider` = `bitpay` and a
    non-empty `checkoutUrl`.
 3. Read back: `GetGatewayPayment` with `{"provider":"bitpay","gatewayId":"<id>"}`
-   must answer the canonical detected state (`DETECTED`) and `rawStatus` = `new`.
+   must answer the canonical pending state (`PENDING`) and `rawStatus` = `new`
+   (a pre-deposit status, KI-connector-14).
 4. Advance the mock invoice: `POST http://localhost:8120/api/v1/simulate` with
    `{"gateway_id":"<id>","provider":"bitpay","status":"confirmed"}`.
 5. Read again: the canonical confirmed state (`CONFIRMED`) with

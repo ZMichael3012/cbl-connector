@@ -40,8 +40,12 @@ type Config struct {
 	BaseURL string
 	// APIToken sets the merchant API token (Authorization: Bearer <token>).
 	APIToken string
-	// IPNToken verifies the callback token echo.
+	// IPNToken verifies the callback token echo and is sent as the order token
+	// at creation so CoinGate echoes our secret back (KI-connector-14).
 	IPNToken []byte
+	// CallbackURL sets the per-order callback URL (our ingress); empty omits
+	// the field and leaves the account-level callback setting in charge.
+	CallbackURL string
 	// Capabilities sets the network rows; Provider is forced to "coingate".
 	Capabilities domain.Capabilities
 	// Timeout sets the HTTP client timeout; <= 0 means the default.
@@ -55,6 +59,7 @@ type Adapter struct {
 	baseURL      string
 	apiToken     string
 	ipnToken     []byte
+	callbackURL  string
 	capabilities domain.Capabilities
 	decimals     map[string]uint32
 	client       *http.Client
@@ -126,6 +131,7 @@ func New(cfg Config) (*Adapter, error) {
 		baseURL:      strings.TrimRight(base, "/"),
 		apiToken:     apiToken,
 		ipnToken:     cfg.IPNToken,
+		callbackURL:  strings.TrimSpace(cfg.CallbackURL),
 		capabilities: capabilities,
 		decimals:     decimals,
 		client:       client,
@@ -148,6 +154,7 @@ type orderResponse struct {
 	PayAmount     string      `json:"pay_amount"`
 	PayCurrency   string      `json:"pay_currency"`
 	PaymentAddr   string      `json:"payment_address"`
+	PaymentURL    string      `json:"payment_url"`
 	CreatedAt     string      `json:"created_at"`
 }
 
@@ -161,6 +168,14 @@ func (a *Adapter) CreateInvoice(ctx context.Context, req domain.CreateInvoiceReq
 		"price_amount":   req.Amount.String(),
 		"price_currency": strings.ToUpper(strings.TrimSpace(req.Amount.Asset)),
 		"pay_currency":   strings.ToUpper(strings.TrimSpace(req.Network)),
+		"title":          "CBL payment",
+		"description":    req.PaymentID,
+		// The token is our IPN secret: CoinGate echoes it in every callback so
+		// the ingress token echo verifies (KI-connector-14).
+		"token": string(a.ipnToken),
+	}
+	if a.callbackURL != "" {
+		body["callback_url"] = a.callbackURL
 	}
 	payload, err := a.request(ctx, http.MethodPost, "/v2/orders", body, domain.ErrRejected)
 	if err != nil {
@@ -181,8 +196,11 @@ func (a *Adapter) CreateInvoice(ctx context.Context, req domain.CreateInvoiceReq
 		GatewayID: decoded.ID.String(),
 		Provider:  "coingate",
 		Address:   decoded.PaymentAddr,
-		Network:   req.Network,
-		Amount:    amount,
+		// The hosted checkout page is the destination when no address is
+		// issued at creation (KI-connector-14).
+		CheckoutURL: decoded.PaymentURL,
+		Network:     req.Network,
+		Amount:      amount,
 		// CoinGate orders carry no expiry: the request horizon is echoed (E-1).
 		ExpiresAt: req.ExpiresAt.UTC(),
 	}, nil
@@ -271,8 +289,12 @@ func (a *Adapter) ExportPayments(ctx context.Context, req domain.ExportRequest) 
 	query := url.Values{}
 	query.Set("page", strconv.Itoa(page))
 	query.Set("per_page", strconv.Itoa(req.Limit))
-	query.Set("from", req.From.UTC().Format(time.RFC3339))
-	query.Set("to", req.To.UTC().Format(time.RFC3339))
+	// The real API ignores from/to and windows by created_at; the ascending
+	// sort keeps the offset cursor stable while new orders arrive
+	// (KI-connector-14).
+	query.Set("created_at[from]", req.From.UTC().Format("2006-01-02"))
+	query.Set("created_at[to]", req.To.UTC().Format("2006-01-02"))
+	query.Set("sort", "created_at_asc")
 	payload, err := a.request(ctx, http.MethodGet, "/v2/orders?"+query.Encode(), nil, domain.ErrGatewayNotFound)
 	if err != nil {
 		return domain.ExportPage{}, err
@@ -317,9 +339,10 @@ func (a *Adapter) exportStatusOf(decoded orderResponse) domain.PaymentStatus {
 	return status
 }
 
-// orderStates maps CoinGate order statuses to canonical states.
+// orderStates maps CoinGate order statuses to canonical states; a pre-deposit
+// status (`new`) is pending, never a fabricated detection (KI-connector-14).
 var orderStates = map[string]domain.State{
-	"new":        domain.StateDetected,
+	"new":        domain.StatePending,
 	"pending":    domain.StateDetected,
 	"confirming": domain.StateDetected,
 	"paid":       domain.StateConfirmed,
@@ -566,7 +589,10 @@ func (a *Adapter) request(ctx context.Context, method, path string, body any, no
 	case response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= http.StatusInternalServerError:
 		return nil, fmt.Errorf("%w: provider status %d", domain.ErrTemporary, response.StatusCode)
 	case response.StatusCode >= http.StatusBadRequest:
-		return nil, fmt.Errorf("%w: provider status %d: %s", domain.ErrRejected, response.StatusCode, truncateText(payload))
+		// The excerpt may echo the request (headers or body) carrying the API
+		// or IPN token: redact configured secrets before it reaches logs or
+		// DLQ texts (security review 17.26).
+		return nil, fmt.Errorf("%w: provider status %d: %s", domain.ErrRejected, response.StatusCode, truncateText(providerwire.Redact(payload, a.apiToken, string(a.ipnToken))))
 	default:
 		return payload, nil
 	}

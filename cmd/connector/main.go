@@ -127,6 +127,7 @@ func main() {
 			PrivateKeyPEM: os.Getenv("CONNECTOR_BITPAY_PRIVATE_KEY_PEM"),
 			WebhookSecret: []byte(os.Getenv("CONNECTOR_BITPAY_WEBHOOK_SECRET")),
 			WebhookURL:    os.Getenv("CONNECTOR_BITPAY_WEBHOOK_URL"),
+			BuyerEmail:    os.Getenv("CONNECTOR_BITPAY_BUYER_EMAIL"),
 			Capabilities:  capabilities,
 			Timeout:       durationEnv(log, "CONNECTOR_BITPAY_TIMEOUT", 10*time.Second),
 		})
@@ -172,6 +173,7 @@ func main() {
 			BaseURL:      base,
 			APIToken:     os.Getenv("CONNECTOR_COINGATE_API_TOKEN"),
 			IPNToken:     []byte(os.Getenv("CONNECTOR_COINGATE_IPN_TOKEN")),
+			CallbackURL:  os.Getenv("CONNECTOR_COINGATE_CALLBACK_URL"),
 			Capabilities: capabilities,
 			Timeout:      durationEnv(log, "CONNECTOR_COINGATE_TIMEOUT", 10*time.Second),
 		})

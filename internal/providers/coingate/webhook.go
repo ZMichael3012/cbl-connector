@@ -51,6 +51,11 @@ func (a *Adapter) VerifyWebhook(headers map[string][]string, rawBody []byte) (do
 	if !ok {
 		return domain.CanonicalEvent{}, fmt.Errorf("%w: callback status %q", domain.ErrUnknownState, decoded.Status)
 	}
+	if state == domain.StatePending {
+		// A pre-deposit callback carries no payment event; the fetch-mandatory
+		// path re-reads the order later (KI-connector-14).
+		return domain.CanonicalEvent{}, fmt.Errorf("%w: callback status %q carries no deposit", domain.ErrInvalidWebhook, decoded.Status)
+	}
 	return domain.CanonicalEvent{
 		Type:       state,
 		PaymentID:  decoded.OrderID,

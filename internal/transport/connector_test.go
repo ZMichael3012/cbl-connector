@@ -349,6 +349,27 @@ func TestGetGatewayPayment(t *testing.T) {
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
 }
 
+func TestGetGatewayPaymentPending(t *testing.T) {
+	t.Parallel()
+	gateway := &fakeGateway{status: domain.PaymentStatus{
+		PaymentID: "018f8f5c-3f7a-7b2e-9c4d-2a1b3c4d5e6f",
+		GatewayID: "order-778",
+		Provider:  "coingate",
+		State:     domain.StatePending,
+		RawStatus: "new",
+	}}
+	server := newServer(t, gateway, &fakeSelector{selected: gateway}, &fakeMapping{}, &fakeCaps{})
+
+	response, err := server.GetGatewayPayment(context.Background(), &connectorv1.GetGatewayPaymentRequest{
+		Provider:  "coingate",
+		GatewayId: "order-778",
+	})
+	require.NoError(t, err)
+	require.Equal(t, connectorv1.CanonicalPaymentStatusValue_CANONICAL_PAYMENT_STATUS_VALUE_PENDING,
+		response.GetPayment().GetStatus(), "a pre-deposit status travels as PENDING (7)")
+	require.Equal(t, "new", response.GetPayment().GetRawStatus())
+}
+
 func TestGatewayNotFoundMapping(t *testing.T) {
 	t.Parallel()
 	gateway := &fakeGateway{statusErr: domain.ErrGatewayNotFound}
@@ -590,6 +611,17 @@ func TestListGatewayPaymentsRejectsAdapterViolations(t *testing.T) {
 		server := newServer(t, gateway, &fakeSelector{}, &fakeMapping{}, &fakeCaps{})
 		_, err := server.ListGatewayPayments(context.Background(), listRequest())
 		require.Equal(t, codes.Internal, status.Code(err))
+	})
+	t.Run("pending row maps to the pending enum", func(t *testing.T) {
+		gateway := &fakeGateway{exportPage: domain.ExportPage{
+			Payments: []domain.PaymentStatus{{GatewayID: "gw-1", State: domain.StatePending, RawStatus: "new"}},
+		}}
+		server := newServer(t, gateway, &fakeSelector{}, &fakeMapping{}, &fakeCaps{})
+		response, err := server.ListGatewayPayments(context.Background(), listRequest())
+		require.NoError(t, err)
+		require.Len(t, response.GetPayments(), 1)
+		require.Equal(t, connectorv1.CanonicalPaymentStatusValue_CANONICAL_PAYMENT_STATUS_VALUE_PENDING,
+			response.GetPayments()[0].GetStatus())
 	})
 	t.Run("page above the requested limit", func(t *testing.T) {
 		gateway := &fakeGateway{exportPage: domain.ExportPage{

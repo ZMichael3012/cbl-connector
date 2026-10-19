@@ -56,6 +56,27 @@ func TestExportPaymentsPage(t *testing.T) {
 	assert.Equal(t, domain.EncodeExportCursor(9), page.NextCursor, "a full page carries the next cursor")
 }
 
+func TestExportPaymentsWaitingRowIsPending(t *testing.T) {
+	t.Parallel()
+	server := wireServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[
+			{"payment_id":"gw-9","order_id":"o-9","payment_status":"waiting","pay_currency":"usdttrc20"}
+		]}`))
+	})
+	adapter, err := nowpayments.New(testConfig(server.URL))
+	require.NoError(t, err)
+
+	page, err := adapter.ExportPayments(context.Background(), domain.ExportRequest{
+		From:  time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC),
+		To:    time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC),
+		Limit: 2,
+	})
+	require.NoError(t, err)
+	require.Len(t, page.Payments, 1)
+	assert.Equal(t, domain.StatePending, page.Payments[0].State,
+		"the export keeps the pre-deposit status distinct from a detection (KI-connector-14)")
+}
+
 func TestExportPaymentsSoftRows(t *testing.T) {
 	t.Parallel()
 	server := wireServer(t, func(w http.ResponseWriter, _ *http.Request) {

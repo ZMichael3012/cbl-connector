@@ -15,12 +15,13 @@ import (
 )
 
 // webhookTypes maps Greenfield webhook types to canonical states and the raw
-// status keyword the type implies.
+// status keyword the type implies; InvoiceCreated is a pre-deposit type and
+// carries no event (KI-connector-14).
 var webhookTypes = map[string]struct {
 	state domain.State
 	raw   string
 }{
-	"InvoiceCreated":         {state: domain.StateDetected, raw: "New"},
+	"InvoiceCreated":         {state: domain.StatePending, raw: "New"},
 	"InvoiceReceivedPayment": {state: domain.StateDetected, raw: "Processing"},
 	"InvoiceProcessing":      {state: domain.StateDetected, raw: "Processing"},
 	"InvoiceSettled":         {state: domain.StateConfirmed, raw: "Settled"},
@@ -74,6 +75,11 @@ func (a *Adapter) VerifyWebhook(headers map[string][]string, rawBody []byte) (do
 	mapped, ok := webhookTypes[decoded.Type]
 	if !ok {
 		return domain.CanonicalEvent{}, fmt.Errorf("%w: webhook type %q", domain.ErrUnknownState, decoded.Type)
+	}
+	if mapped.state == domain.StatePending {
+		// A pre-deposit delivery carries no payment event; the fetch-mandatory
+		// path re-reads the invoice later (KI-connector-14).
+		return domain.CanonicalEvent{}, fmt.Errorf("%w: webhook type %q carries no deposit", domain.ErrInvalidWebhook, decoded.Type)
 	}
 	return domain.CanonicalEvent{
 		Type:       mapped.state,

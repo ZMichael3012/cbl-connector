@@ -202,7 +202,15 @@ func TestNewValidation(t *testing.T) {
 		"missing key":       func(c *bitpay.Config) { c.PrivateKeyPEM = "" },
 		"garbage pem":       func(c *bitpay.Config) { c.PrivateKeyPEM = "not a pem" },
 		"missing webhook":   func(c *bitpay.Config) { c.WebhookSecret = nil },
-		"no networks":       func(c *bitpay.Config) { c.Capabilities = domain.Capabilities{} },
+		"sandbox buyer email on the production host": func(c *bitpay.Config) {
+			c.BaseURL = "https://bitpay.com"
+			c.BuyerEmail = "sandbox@cbl.test"
+		},
+		"malformed buyer email on the test host": func(c *bitpay.Config) {
+			c.BaseURL = "https://test.bitpay.com"
+			c.BuyerEmail = "not-an-email"
+		},
+		"no networks": func(c *bitpay.Config) { c.Capabilities = domain.Capabilities{} },
 		"empty capability row": func(c *bitpay.Config) {
 			c.Capabilities.Networks = map[string]domain.NetworkCapability{"usdt_trc20": {}}
 		},
@@ -230,6 +238,12 @@ func TestNewValidation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "bitpay", adapter.Capabilities().Provider)
 	assert.Equal(t, "bitpay", adapter.Provider())
+
+	sandbox := base
+	sandbox.BaseURL = "https://test.bitpay.com"
+	sandbox.BuyerEmail = "sandbox@cbl.test"
+	_, err = bitpay.New(sandbox)
+	require.NoError(t, err, "the sandbox buyer contact is accepted on the test host")
 
 	_, err = adapter.CreateInvoice(context.Background(), domain.CreateInvoiceRequest{
 		IdempotencyKey: "k",
@@ -311,9 +325,87 @@ func TestRequestSigning(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "2.0.0", recorded.header.Get("X-Accept-Version"))
-	assert.Equal(t, "Bearer pairing-token", recorded.header.Get("Authorization"))
+	assert.Empty(t, recorded.header.Get("Authorization"),
+		"BitPay ignores the Authorization header; the token travels in the body or query (KI-connector-10)")
 	assert.NotEmpty(t, recorded.header.Get("X-Signature"))
 	verifyRequestSignature(t, key, recorded.fullURL, recorded.body, recorded.header)
+}
+
+func TestGetRequestCarriesTokenQuery(t *testing.T) {
+	t.Parallel()
+	keyPEM, key := testKeyPEM(t, "sec1")
+	var recorded struct {
+		fullURL string
+		header  http.Header
+	}
+	server := wireServer(t, func(w http.ResponseWriter, r *http.Request) {
+		recorded.fullURL = "http://" + r.Host + r.URL.RequestURI()
+		recorded.header = r.Header.Clone()
+		_, _ = w.Write([]byte(invoiceBody("bp-gw-1", "complete", "12.340000", 0)))
+	})
+	config := testConfig(t, server.URL)
+	config.PrivateKeyPEM = keyPEM
+	config.APIToken = "pairing-token"
+	adapter, err := bitpay.New(config)
+	require.NoError(t, err)
+
+	_, err = adapter.GetPayment(context.Background(), "bp-gw-1")
+	require.NoError(t, err)
+
+	assert.Contains(t, recorded.fullURL, "token=pairing-token",
+		"merchant reads carry the token as a query parameter (verified live 19.10.2026)")
+	assert.Empty(t, recorded.header.Get("Authorization"))
+	verifyRequestSignature(t, key, recorded.fullURL, nil, recorded.header)
+
+	// A GET that already carries a query keeps its parameters and gains the
+	// token; the signature covers the merged URL.
+	recorded.fullURL = ""
+	_, err = adapter.LookupByOrderID(context.Background(), "order-1")
+	require.NoError(t, err)
+	assert.Contains(t, recorded.fullURL, "orderId=order-1")
+	assert.Contains(t, recorded.fullURL, "token=pairing-token")
+	verifyRequestSignature(t, key, recorded.fullURL, nil, recorded.header)
+}
+
+func TestCreateInvoiceSandboxBuyerContact(t *testing.T) {
+	t.Parallel()
+	var captured []byte
+	server := wireServer(t, func(w http.ResponseWriter, r *http.Request) {
+		captured = readBody(t, r)
+		_, _ = w.Write([]byte(invoiceBody("bp-gw-1", "new", "0.000000", 0)))
+	})
+	config := testConfig(t, server.URL)
+	config.BuyerEmail = "sandbox@cbl.test"
+	adapter, err := bitpay.New(config)
+	require.NoError(t, err)
+
+	_, err = adapter.CreateInvoice(context.Background(), createRequest())
+	require.NoError(t, err)
+
+	var sent struct {
+		Buyer struct {
+			Email string `json:"email"`
+		} `json:"buyer"`
+		Wallet   string `json:"forcedBuyerSelectedWallet"`
+		Currency string `json:"forcedBuyerSelectedTransactionCurrency"`
+	}
+	require.NoError(t, json.Unmarshal(captured, &sent))
+	assert.Equal(t, "sandbox@cbl.test", sent.Buyer.Email, "the mock pay requires a contact email")
+	assert.Equal(t, "bitpay", sent.Wallet)
+	assert.Equal(t, "USDT", sent.Currency, "the forced transaction currency is the request asset")
+
+	plain := wireServer(t, func(w http.ResponseWriter, r *http.Request) {
+		captured = readBody(t, r)
+		_, _ = w.Write([]byte(invoiceBody("bp-gw-1", "new", "0.000000", 0)))
+	})
+	adapter, err = bitpay.New(testConfig(t, plain.URL))
+	require.NoError(t, err)
+	_, err = adapter.CreateInvoice(context.Background(), createRequest())
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(captured, &raw))
+	assert.NotContains(t, raw, "buyer", "without the sandbox buyer email the buyer fields stay absent")
+	assert.NotContains(t, raw, "forcedBuyerSelectedWallet")
 }
 
 func TestCreateInvoiceHappyPath(t *testing.T) {
@@ -471,12 +563,38 @@ func TestErrorClassification(t *testing.T) {
 	_, err = adapter.CreateInvoice(context.Background(), createRequest())
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, domain.ErrTemporary), "a dial error is temporary: %v", err)
+
+	// A GET transport failure embeds the request URL: the token query
+	// parameter must not leak into the error text (KI-connector-10).
+	_, err = adapter.GetPayment(context.Background(), "bp-gw-1")
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "pair-token", "the token must not leak into transport error texts: %v", err)
+}
+
+func TestProviderErrorBodyDoesNotLeakToken(t *testing.T) {
+	t.Parallel()
+	server := wireServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		//nolint:gosec // G705: a test wire server echoing its own request URI to simulate a WAF page.
+		_, _ = w.Write([]byte(`{"error":"blocked uri ` + r.URL.RequestURI() + `"}`))
+	})
+	config := testConfig(t, server.URL)
+	config.APIToken = "pairing-token"
+	adapter, err := bitpay.New(config)
+	require.NoError(t, err)
+
+	_, err = adapter.GetPayment(context.Background(), "bp-gw-1")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, domain.ErrRejected))
+	assert.NotContains(t, err.Error(), "pairing-token",
+		"a provider excerpt echoing the request URI must be redacted (security review 17.26): %v", err)
+	assert.Contains(t, err.Error(), "[redacted]")
 }
 
 func TestStatusMapping(t *testing.T) {
 	t.Parallel()
 	expected := map[string]domain.State{
-		"new":       domain.StateDetected,
+		"new":       domain.StatePending,
 		"paid":      domain.StateDetected,
 		"confirmed": domain.StateDetected,
 		"complete":  domain.StateConfirmed,
@@ -603,6 +721,11 @@ func TestVerifyWebhookRawHMAC(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, domain.ErrUnknownState), "an unknown status must not be mapped: %v", err)
 
+	pending := []byte(webhookBody("new", 1792248000000))
+	_, err = adapter.VerifyWebhook(map[string][]string{"x-signature": {signWebhook([]byte(testWebhookSecret), pending)}}, pending)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, domain.ErrInvalidWebhook), "a pre-deposit status carries no event: %v", err)
+
 	malformed := []byte("not json")
 	_, err = adapter.VerifyWebhook(map[string][]string{"x-signature": {signWebhook([]byte(testWebhookSecret), malformed)}}, malformed)
 	require.Error(t, err)
@@ -690,12 +813,14 @@ func TestCreatePayoutProvisionalShape(t *testing.T) {
 		Curr    string      `json:"currency"`
 		Address string      `json:"address"`
 		Ref     string      `json:"reference"`
+		Token   string      `json:"token"`
 	}
 	require.NoError(t, json.Unmarshal(captured, &sent))
 	assert.Equal(t, "12340000", sent.Amount.String())
 	assert.Equal(t, "USDT", sent.Curr)
 	assert.Equal(t, "MOCKADDR", sent.Address)
 	assert.Equal(t, "payout-1", sent.Ref)
+	assert.Equal(t, "pair-token", sent.Token, "POST bodies carry the token: BitPay ignores Authorization (KI-connector-10)")
 
 	before := calls
 	_, err = adapter.CreatePayout(context.Background(), domain.PayoutRequest{
@@ -787,6 +912,7 @@ func TestCreateRefundProvisionalShape(t *testing.T) {
 		Curr      string      `json:"currency"`
 		Ref       string      `json:"reference"`
 		Address   string      `json:"address"`
+		Token     string      `json:"token"`
 	}
 	require.NoError(t, json.Unmarshal(captured, &sent))
 	assert.Equal(t, "bp-gw-1", sent.InvoiceID)
@@ -794,6 +920,7 @@ func TestCreateRefundProvisionalShape(t *testing.T) {
 	assert.Equal(t, "USDT", sent.Curr)
 	assert.Equal(t, "po-77", sent.Ref, "the per-command reference carries the payout id (17.12)")
 	assert.Equal(t, "MOCKADDR", sent.Address)
+	assert.Equal(t, "pair-token", sent.Token, "POST bodies carry the token (KI-connector-10)")
 
 	before := calls
 	_, err = adapter.CreateRefund(context.Background(), domain.RefundRequest{

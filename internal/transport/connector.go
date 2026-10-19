@@ -204,7 +204,7 @@ func (s *ConnectorServer) GetGatewayPayment(ctx context.Context, req *connectorv
 		return nil, statusFromError(err)
 	}
 	switch payment.State {
-	case domain.StateDetected, domain.StateConfirmed, domain.StateFailed,
+	case domain.StatePending, domain.StateDetected, domain.StateConfirmed, domain.StateFailed,
 		domain.StateExpired, domain.StateUnderpaid, domain.StateOverpaid:
 	default:
 		s.log.Error("provider returned an unknown state",
@@ -317,7 +317,7 @@ func (s *ConnectorServer) ListGatewayPayments(ctx context.Context, req *connecto
 		}
 		if payment.State != "" {
 			switch payment.State {
-			case domain.StateDetected, domain.StateConfirmed, domain.StateFailed,
+			case domain.StatePending, domain.StateDetected, domain.StateConfirmed, domain.StateFailed,
 				domain.StateExpired, domain.StateUnderpaid, domain.StateOverpaid:
 			default:
 				s.log.Error("provider returned an unknown state in the export",
@@ -427,6 +427,8 @@ func canonicalStatus(payment domain.PaymentStatus) *connectorv1.CanonicalPayment
 // states are rejected by the caller before this point.
 func canonicalStatusValue(state domain.State) connectorv1.CanonicalPaymentStatusValue {
 	switch state {
+	case domain.StatePending:
+		return connectorv1.CanonicalPaymentStatusValue_CANONICAL_PAYMENT_STATUS_VALUE_PENDING
 	case domain.StateDetected:
 		return connectorv1.CanonicalPaymentStatusValue_CANONICAL_PAYMENT_STATUS_VALUE_DETECTED
 	case domain.StateConfirmed:

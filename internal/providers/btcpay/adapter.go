@@ -347,9 +347,10 @@ func (a *Adapter) exportStatusOf(decoded invoiceResponse) domain.PaymentStatus {
 	return status
 }
 
-// invoiceStates maps Greenfield invoice statuses to canonical states.
+// invoiceStates maps Greenfield invoice statuses to canonical states; `New` is
+// a pre-deposit status and maps to pending (KI-connector-14).
 var invoiceStates = map[string]domain.State{
-	"New":        domain.StateDetected,
+	"New":        domain.StatePending,
 	"Processing": domain.StateDetected,
 	"Settled":    domain.StateConfirmed,
 	"Expired":    domain.StateExpired,
@@ -538,7 +539,7 @@ func (a *Adapter) request(ctx context.Context, method, path string, body any, no
 	case response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= http.StatusInternalServerError:
 		return nil, fmt.Errorf("%w: provider status %d", domain.ErrTemporary, response.StatusCode)
 	case response.StatusCode >= http.StatusBadRequest:
-		return nil, fmt.Errorf("%w: provider status %d: %s", domain.ErrRejected, response.StatusCode, truncateText(payload))
+		return nil, fmt.Errorf("%w: provider status %d: %s", domain.ErrRejected, response.StatusCode, truncateText(providerwire.Redact(payload, a.token)))
 	default:
 		return payload, nil
 	}

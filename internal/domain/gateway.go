@@ -21,6 +21,10 @@ type State string
 const (
 	// StateDetected describes detection of a payment.
 	StateDetected State = "detected"
+	// StatePending describes a pre-deposit provider status: the invoice exists
+	// but no payment has been seen yet. Reads and exports only; it is never a
+	// canonical event (the fetch path retries instead).
+	StatePending State = "pending"
 	// StateConfirmed describes final confirmation of a payment.
 	StateConfirmed State = "confirmed"
 	// StateFailed describes an unsuccessful payment.

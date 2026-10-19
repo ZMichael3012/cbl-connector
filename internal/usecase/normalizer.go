@@ -220,6 +220,11 @@ func (n *Normalizer) fetchCanonical(ctx context.Context, raw *eventsv1.GatewayWe
 	if err != nil {
 		return domain.CanonicalEvent{}, fmt.Errorf("usecase: fetch payment status for provider %q: %w", provider, err)
 	}
+	if status.State == domain.StatePending {
+		// A pre-deposit status carries no canonical event yet: retry instead of
+		// publishing a fabricated detection (KI-connector-14).
+		return domain.CanonicalEvent{}, fmt.Errorf("%w: provider %q reports a pre-deposit status %q", domain.ErrTemporary, provider, status.RawStatus)
+	}
 	paymentID, err := n.reconcilePayment(ctx, provider, gatewayID, status.PaymentID)
 	if err != nil {
 		return domain.CanonicalEvent{}, err

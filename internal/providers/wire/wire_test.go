@@ -10,6 +10,19 @@ import (
 	"github.com/cbl/cbl-connector/internal/providers/wire"
 )
 
+func TestRedact(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`{"error":"blocked /invoices?token=sec/ret+1 body sec/ret+1"}`)
+	redacted := wire.Redact(raw, "sec/ret+1", "")
+	assert.Equal(t, `{"error":"blocked /invoices?token=[redacted] body [redacted]"}`, string(redacted))
+
+	encoded := []byte(`{"error":"blocked /invoices?token=sec%2Fret%2B1"}`)
+	assert.Equal(t, `{"error":"blocked /invoices?token=[redacted]"}`, string(wire.Redact(encoded, "sec/ret+1")))
+
+	assert.Equal(t, raw, wire.Redact(raw), "no secrets configured leaves the excerpt untouched")
+}
+
 type sample struct {
 	ID     int    `json:"id"`
 	Status string `json:"status"`

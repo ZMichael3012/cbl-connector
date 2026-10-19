@@ -63,6 +63,11 @@ func (a *Adapter) VerifyWebhook(headers map[string][]string, rawBody []byte) (do
 	if !ok {
 		return domain.CanonicalEvent{}, fmt.Errorf("%w: callback status %q", domain.ErrUnknownState, truncateText([]byte(decoded.Data.Status)))
 	}
+	if state == domain.StatePending {
+		// A pre-deposit callback carries no payment event; the fetch-mandatory
+		// path re-reads the invoice later (KI-connector-14).
+		return domain.CanonicalEvent{}, fmt.Errorf("%w: callback status %q carries no deposit", domain.ErrInvalidWebhook, truncateText([]byte(decoded.Data.Status)))
+	}
 	received := money.Money{}
 	if len(decoded.Data.AmountPaid) > 0 && strings.TrimSpace(decoded.Data.Currency) != "" {
 		parsed, err := a.parseAmountLiteral(decoded.Data.AmountPaid, decoded.Data.Currency)

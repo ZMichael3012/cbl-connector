@@ -20,8 +20,10 @@ func TestExportPaymentsPage(t *testing.T) {
 		query := r.URL.Query()
 		assert.Equal(t, "2", query.Get("page"))
 		assert.Equal(t, "2", query.Get("per_page"))
-		assert.Equal(t, "2026-10-18T00:00:00Z", query.Get("from"))
-		assert.Equal(t, "2026-10-18T01:00:00Z", query.Get("to"))
+		assert.Equal(t, "2026-10-18", query.Get("created_at[from]"),
+			"the real API window uses created_at dates; from/to are ignored by CoinGate")
+		assert.Equal(t, "2026-10-18", query.Get("created_at[to]"))
+		assert.Equal(t, "created_at_asc", query.Get("sort"), "the ascending walk keeps the offset cursor stable")
 		_, _ = w.Write([]byte(`{"orders":[
 			{"id":1042,"status":"paid","order_id":"01a14f70-0000-7000-8000-000000000001","pay_amount":"12.340000","pay_currency":"USDT_TRC20","created_at":"2026-10-18T00:30:00Z"},
 			{"id":1043,"status":"weird","order_id":"01a14f70-0000-7000-8000-000000000002","pay_currency":"USDT_TRC20"}
@@ -91,7 +93,7 @@ func TestExportPaymentsArrayAnswerAndErrors(t *testing.T) {
 	})
 	require.NoError(t, err, "a bare array answer is tolerated")
 	require.Len(t, page.Payments, 1)
-	assert.Equal(t, domain.StateDetected, page.Payments[0].State)
+	assert.Equal(t, domain.StatePending, page.Payments[0].State, "a new order is a pre-deposit status")
 	assert.Empty(t, page.NextCursor, "a short page terminates the walk")
 
 	_, err = adapter.ExportPayments(context.Background(), domain.ExportRequest{

@@ -379,7 +379,7 @@ func TestCreateInvoiceBadAmount(t *testing.T) {
 func TestGetPaymentStatusMapping(t *testing.T) {
 	t.Parallel()
 	cases := map[string]domain.State{
-		"New":        domain.StateDetected,
+		"New":        domain.StatePending,
 		"Processing": domain.StateDetected,
 		"Settled":    domain.StateConfirmed,
 		"Expired":    domain.StateExpired,
@@ -455,6 +455,11 @@ func TestVerifyWebhook(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, domain.ErrUnknownState), "an unknown type must not be mapped: %v", err)
 
+	created := `{"deliveryId":"d","webhookId":"w","type":"InvoiceCreated","invoiceId":"abcdef0123456789abcdef0123456789","storeId":"` + testStoreID + `"}`
+	_, err = adapter.VerifyWebhook(map[string][]string{"BTCPay-Sig": {signWebhook(secret, created)}}, []byte(created))
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, domain.ErrInvalidWebhook), "a pre-deposit type carries no event: %v", err)
+
 	foreignStore := `{"deliveryId":"d","webhookId":"w","type":"InvoiceSettled","invoiceId":"inv-1","storeId":"other-store"}`
 	_, err = adapter.VerifyWebhook(map[string][]string{"BTCPay-Sig": {signWebhook(secret, foreignStore)}}, []byte(foreignStore))
 	require.Error(t, err)
@@ -482,7 +487,7 @@ func TestLookupByOrderID(t *testing.T) {
 	require.NoError(t, err)
 	status, err = adapter.LookupByOrderID(context.Background(), "order-1")
 	require.NoError(t, err)
-	assert.Equal(t, domain.StateDetected, status.State)
+	assert.Equal(t, domain.StatePending, status.State)
 
 	emptyWire := wireServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("[]"))

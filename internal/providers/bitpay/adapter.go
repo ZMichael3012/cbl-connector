@@ -73,7 +73,8 @@ type pkcs8Envelope struct {
 type Config struct {
 	// BaseURL sets the API root, for example https://bitpay.com.
 	BaseURL string
-	// APIToken sets an optional pairing token (Authorization: Bearer <token>).
+	// APIToken sets the pairing token: POST/PUT bodies carry it, GET requests
+	// carry it as the token query parameter (BitPay ignores Authorization).
 	APIToken string
 	// PrivateKeyPEM sets the secp256k1 request-signing key (SEC1 or PKCS8 PEM).
 	PrivateKeyPEM string
@@ -81,6 +82,10 @@ type Config struct {
 	WebhookSecret []byte
 	// WebhookURL sets the optional notificationURL sent at invoice creation.
 	WebhookURL string
+	// BuyerEmail enables the sandbox mock pay: when set, the create body gains
+	// the buyer contact email and the forced buyer selections (wallet bitpay,
+	// transaction currency = the request asset). Never set in production.
+	BuyerEmail string
 	// Capabilities sets the network rows; Provider is forced to "bitpay".
 	Capabilities domain.Capabilities
 	// Timeout sets the HTTP client timeout; <= 0 means the default.
@@ -95,6 +100,7 @@ type Adapter struct {
 	apiToken      string
 	webhookURL    string
 	webhookSecret []byte
+	buyerEmail    string
 	privateKey    *secp256k1.PrivateKey
 	identityHex   string
 	capabilities  domain.Capabilities
@@ -138,6 +144,19 @@ func New(cfg Config) (*Adapter, error) {
 	}
 	if len(cfg.WebhookSecret) == 0 {
 		return nil, fmt.Errorf("%w: webhook secret is required", ErrConfiguration)
+	}
+	buyerEmail := strings.TrimSpace(cfg.BuyerEmail)
+	if buyerEmail != "" {
+		// The buyer contact exists for the sandbox mock pay only: production
+		// must not preselect the buyer wallet (T-CONNECTOR-26), so the option
+		// fails closed on every BitPay production host.
+		host := strings.ToLower(parsed.Hostname())
+		if host == "bitpay.com" || (strings.HasSuffix(host, ".bitpay.com") && host != "test.bitpay.com") {
+			return nil, fmt.Errorf("%w: buyer email is a sandbox-only option", ErrConfiguration)
+		}
+		if len(buyerEmail) > 254 || !strings.Contains(buyerEmail, "@") {
+			return nil, fmt.Errorf("%w: buyer email is malformed", ErrConfiguration)
+		}
 	}
 	if len(cfg.Capabilities.Networks) == 0 {
 		return nil, fmt.Errorf("%w: at least one network capability is required", ErrConfiguration)
@@ -190,6 +209,7 @@ func New(cfg Config) (*Adapter, error) {
 		apiToken:      apiToken,
 		webhookURL:    strings.TrimSpace(cfg.WebhookURL),
 		webhookSecret: cfg.WebhookSecret,
+		buyerEmail:    buyerEmail,
 		privateKey:    privateKey,
 		identityHex:   hex.EncodeToString(privateKey.PubKey().SerializeCompressed()),
 		capabilities:  capabilities,
@@ -341,6 +361,14 @@ func (a *Adapter) CreateInvoice(ctx context.Context, req domain.CreateInvoiceReq
 	}
 	if a.webhookURL != "" {
 		body["notificationURL"] = a.webhookURL
+	}
+	if a.buyerEmail != "" {
+		// The sandbox mock pay requires a contact email and the preselected
+		// wallet/currency; production must not preselect the buyer's wallet
+		// (T-CONNECTOR-26).
+		body["buyer"] = map[string]string{"email": a.buyerEmail}
+		body["forcedBuyerSelectedWallet"] = "bitpay"
+		body["forcedBuyerSelectedTransactionCurrency"] = strings.ToUpper(strings.TrimSpace(req.Amount.Asset))
 	}
 	payload, err := a.request(ctx, http.MethodPost, "/invoices", body, domain.ErrRejected)
 	if err != nil {
@@ -525,9 +553,10 @@ func (a *Adapter) exportStatusOf(decoded invoiceResponse) domain.PaymentStatus {
 	return status
 }
 
-// invoiceStates maps BitPay invoice statuses to canonical states.
+// invoiceStates maps BitPay invoice statuses to canonical states; `new` is a
+// pre-deposit status and maps to pending (KI-connector-14).
 var invoiceStates = map[string]domain.State{
-	"new":       domain.StateDetected,
+	"new":       domain.StatePending,
 	"paid":      domain.StateDetected,
 	"confirmed": domain.StateDetected,
 	"complete":  domain.StateConfirmed,
@@ -568,6 +597,7 @@ func (a *Adapter) CreatePayout(ctx context.Context, req domain.PayoutRequest) (d
 		"currency":  strings.ToUpper(strings.TrimSpace(req.Amount.Asset)),
 		"address":   req.Address,
 		"reference": req.PayoutID,
+		"token":     a.apiToken,
 	}
 	payload, err := a.request(ctx, http.MethodPost, "/payouts", body, domain.ErrRejected)
 	if err != nil {
@@ -625,6 +655,7 @@ func (a *Adapter) CreateRefund(ctx context.Context, req domain.RefundRequest) (d
 		"amount":    req.Amount.MinorUnits,
 		"currency":  strings.ToUpper(strings.TrimSpace(req.Amount.Asset)),
 		"reference": referenceOf(req),
+		"token":     a.apiToken,
 	}
 	if address := strings.TrimSpace(req.Address); address != "" {
 		body["address"] = address
@@ -762,26 +793,49 @@ func (a *Adapter) request(ctx context.Context, method, path string, body any, no
 		payload = encoded
 	}
 	fullURL := a.baseURL + path
+	if method == http.MethodGet {
+		// Merchant reads carry the token as a query parameter and the
+		// signature covers the URL including it (verified live 19.10.2026,
+		// KI-connector-10); BitPay ignores the Authorization header.
+		parsed, parseErr := url.Parse(fullURL)
+		if parseErr != nil {
+			return nil, fmt.Errorf("bitpay: build request: %w", parseErr)
+		}
+		query := parsed.Query()
+		query.Set("token", a.apiToken)
+		parsed.RawQuery = query.Encode()
+		fullURL = parsed.String()
+	}
 	var reader io.Reader
 	if payload != nil {
 		reader = bytes.NewReader(payload)
 	}
 	request, err := http.NewRequestWithContext(ctx, method, fullURL, reader)
 	if err != nil {
+		// A build failure wraps the URL (which may carry the token query):
+		// unwrap it so the token never reaches logs (security review 17.26).
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
 		return nil, fmt.Errorf("bitpay: build request: %w", err)
 	}
 	request.Header.Set("X-Accept-Version", acceptVersion)
 	request.Header.Set("X-Identity", a.identityHex)
 	request.Header.Set("X-Signature", a.sign(fullURL, payload))
 	request.Header.Set("Accept", "application/json")
-	if a.apiToken != "" {
-		request.Header.Set("Authorization", "Bearer "+a.apiToken)
-	}
 	if payload != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
 	response, err := a.client.Do(request)
 	if err != nil {
+		// The url.Error of the HTTP client embeds the full URL, which carries
+		// the token query parameter: a transport failure must not leak the
+		// token into logs or DLQ texts (KI-connector-10).
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
 		return nil, fmt.Errorf("%w: %v", domain.ErrTemporary, err)
 	}
 	defer func() { _ = response.Body.Close() }()
@@ -799,7 +853,10 @@ func (a *Adapter) request(ctx context.Context, method, path string, body any, no
 	case response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= http.StatusInternalServerError:
 		return nil, fmt.Errorf("%w: provider status %d", domain.ErrTemporary, response.StatusCode)
 	case response.StatusCode >= http.StatusBadRequest:
-		return nil, fmt.Errorf("%w: provider status %d: %s", domain.ErrRejected, response.StatusCode, truncateText(payload))
+		// The excerpt may echo the request URI (which carries the token query
+		// parameter on reads): redact configured secrets before it reaches
+		// logs or DLQ texts (security review 17.26).
+		return nil, fmt.Errorf("%w: provider status %d: %s", domain.ErrRejected, response.StatusCode, truncateText(providerwire.Redact(payload, a.apiToken)))
 	default:
 		return payload, nil
 	}

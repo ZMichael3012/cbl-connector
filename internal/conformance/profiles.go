@@ -163,7 +163,7 @@ func nowPaymentsFixtures() ProfileFixtures {
 	// consumes it (the same wall-clock concern as btcpay/bitpay).
 	expiration := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
 	statuses := []StatusCase{
-		{Raw: "waiting", Expected: domain.StateDetected},
+		{Raw: "waiting", Expected: domain.StatePending},
 		{Raw: "confirming", Expected: domain.StateDetected},
 		{Raw: "confirmed", Expected: domain.StateDetected},
 		{Raw: "sending", Expected: domain.StateDetected},
@@ -208,7 +208,7 @@ func coinGateFixtures() ProfileFixtures {
 	const gatewayID = "1042"
 	secret := []byte("cg-token")
 	statuses := []StatusCase{
-		{Raw: "new", Expected: domain.StateDetected},
+		{Raw: "new", Expected: domain.StatePending},
 		{Raw: "pending", Expected: domain.StateDetected},
 		{Raw: "confirming", Expected: domain.StateDetected},
 		{Raw: "paid", Expected: domain.StateConfirmed},
@@ -256,7 +256,7 @@ func bitPayFixtures() ProfileFixtures {
 	invoiceTime := time.Now().UnixMilli()
 	expirationTime := time.Now().Add(2 * time.Hour).UnixMilli()
 	statuses := []StatusCase{
-		{Raw: "new", Expected: domain.StateDetected},
+		{Raw: "new", Expected: domain.StatePending},
 		{Raw: "paid", Expected: domain.StateDetected},
 		{Raw: "confirmed", Expected: domain.StateDetected},
 		{Raw: "complete", Expected: domain.StateConfirmed},
@@ -303,7 +303,7 @@ func btcPayFixtures() ProfileFixtures {
 	created := time.Now().Unix()
 	expiration := time.Now().Add(2 * time.Hour).Unix()
 	statuses := []StatusCase{
-		{Raw: "New", Expected: domain.StateDetected},
+		{Raw: "New", Expected: domain.StatePending},
 		{Raw: "Processing", Expected: domain.StateDetected},
 		{Raw: "Settled", Expected: domain.StateConfirmed},
 		{Raw: "Expired", Expected: domain.StateExpired},

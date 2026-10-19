@@ -298,10 +298,17 @@ func (a *Adapter) LookupByOrderID(ctx context.Context, orderID string) (domain.P
 	return a.statusOf(decoded.ID.String(), decoded)
 }
 
+// depositStatuses lists the order statuses whose pay_amount is a real deposit:
+// for every other status (new, pending, invalid, expired, canceled) the field
+// is the quoted amount, not evidence of funds (found by the M1 invalid-order
+// run, 19.10.2026).
+var depositStatuses = map[string]bool{"paid": true, "confirming": true}
+
 // statusOf maps an order body into the canonical status; an unknown status
 // word is never fabricated (E-3). The received amount is the order pay amount
-// (the fetch path requires amount evidence, E-9); a malformed created_at leaves
-// the event time zero and the normalizer falls back to the receipt time (E-8).
+// for deposit statuses and a zero amount with the asset otherwise (the fetch
+// path requires amount evidence, E-9); a malformed created_at leaves the event
+// time zero and the normalizer falls back to the receipt time (E-8).
 func (a *Adapter) statusOf(gatewayID string, decoded orderResponse) (domain.PaymentStatus, error) {
 	state, ok := orderStates[decoded.Status]
 	if !ok {
@@ -313,15 +320,9 @@ func (a *Adapter) statusOf(gatewayID string, decoded orderResponse) (domain.Paym
 			eventTS = parsed.UTC()
 		}
 	}
-	received := money.Money{}
-	if decoded.PayAmount != "" && decoded.PayCurrency != "" {
-		// The pay currency carries the network suffix (USDT_TRC20); the asset
-		// of the amount is its first segment.
-		parsed, err := a.parseAmount(decoded.PayAmount, payAsset(decoded.PayCurrency))
-		if err != nil {
-			return domain.PaymentStatus{}, err
-		}
-		received = parsed
+	received, err := a.receivedEvidence(decoded)
+	if err != nil {
+		return domain.PaymentStatus{}, err
 	}
 	network := ""
 	if decoded.PayCurrency != "" {
@@ -336,6 +337,26 @@ func (a *Adapter) statusOf(gatewayID string, decoded orderResponse) (domain.Paym
 		Network:        network,
 		GatewayEventTS: eventTS,
 	}, nil
+}
+
+// receivedEvidence resolves the amount evidence of an order: the parsed pay
+// amount for deposit statuses, a zero amount carrying the asset otherwise (a
+// non-deposit status must not present the quoted amount as received funds).
+func (a *Adapter) receivedEvidence(decoded orderResponse) (money.Money, error) {
+	if decoded.PayAmount == "" || decoded.PayCurrency == "" {
+		return money.Money{}, nil
+	}
+	// The pay currency carries the network suffix (USDT_TRC20); the asset of
+	// the amount is its first segment.
+	asset := payAsset(decoded.PayCurrency)
+	if !depositStatuses[strings.ToLower(strings.TrimSpace(decoded.Status))] {
+		decimals, err := a.decimalsFor(asset)
+		if err != nil {
+			return money.Money{}, err
+		}
+		return money.Money{Asset: asset, Decimals: decimals}, nil
+	}
+	return a.parseAmount(decoded.PayAmount, asset)
 }
 
 // ExportPayments returns one page of order records for reconciliation (17.13):
@@ -388,7 +409,9 @@ func (a *Adapter) exportStatusOf(decoded orderResponse) domain.PaymentStatus {
 			status.GatewayEventTS = parsed.UTC()
 		}
 	}
-	if decoded.PayAmount != "" && decoded.PayCurrency != "" {
+	if decoded.PayAmount != "" && decoded.PayCurrency != "" && depositStatuses[strings.ToLower(strings.TrimSpace(decoded.Status))] {
+		// A non-deposit status carries the quoted amount: the export leaves the
+		// evidence unset (17.13: absent means no evidence, not a zero).
 		if parsed, err := a.parseAmount(decoded.PayAmount, payAsset(decoded.PayCurrency)); err == nil {
 			status.ReceivedAmount = parsed
 		}

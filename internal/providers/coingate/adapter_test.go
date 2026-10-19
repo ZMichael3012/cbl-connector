@@ -444,8 +444,12 @@ func TestGetPaymentStatusMapping(t *testing.T) {
 			assert.Equal(t, "1042", status.GatewayID)
 			assert.Equal(t, "coingate", status.Provider)
 			assert.Equal(t, int64(1792238400), status.GatewayEventTS.Unix())
-			assert.Equal(t, int64(12340000), status.ReceivedAmount.MinorUnits, "the fetch path requires amount evidence (E-9)")
-			assert.Equal(t, "USDT", status.ReceivedAmount.Asset)
+			if raw == "paid" || raw == "confirming" {
+				assert.Equal(t, int64(12340000), status.ReceivedAmount.MinorUnits, "a deposit status carries the paid amount")
+			} else {
+				assert.Equal(t, int64(0), status.ReceivedAmount.MinorUnits, "a non-deposit status must not present the quoted amount as received")
+			}
+			assert.Equal(t, "USDT", status.ReceivedAmount.Asset, "the fetch path requires amount evidence (E-9)")
 			assert.Equal(t, "usdt_trc20", status.Network)
 		})
 	}

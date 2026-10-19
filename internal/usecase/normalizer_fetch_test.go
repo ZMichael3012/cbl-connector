@@ -3,10 +3,12 @@ package usecase
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	eventsv1 "github.com/cbl/cbl-protos/gen/go/billing/events/v1"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -228,6 +230,23 @@ func TestFetchCanonicalResolvesPaymentViaMapping(t *testing.T) {
 	event, err := normalizer.fetchCanonical(context.Background(), raw, "coingate")
 	require.NoError(t, err)
 	require.Equal(t, "018f8f5c-3f7a-7b2e-9c4d-2a1b3c4d5e6f", event.PaymentID)
+}
+
+// TestReconcilePaymentMappingMissFallsToAdapterID verifies the NOWPayments IPN
+// resolution: the mapping is keyed by the invoice id while the IPN carries the
+// provider payment id, so a mapping miss falls through to the order_id echoed by
+// the fetched status (KI-connector-15).
+func TestReconcilePaymentMappingMissFallsToAdapterID(t *testing.T) {
+	t.Parallel()
+	miss := fmt.Errorf("%w: provider invoice mapping not found", domain.ErrProviderInvoiceNotFound)
+	normalizer := newFetchNormalizer(t, &fakeMapping{err: miss}, nil)
+	resolved, err := normalizer.reconcilePayment(context.Background(), "nowpayments", "5957104571", "7d89a827-7d45-4831-bc72-506aa451ceb0")
+	require.NoError(t, err)
+	assert.Equal(t, "7d89a827-7d45-4831-bc72-506aa451ceb0", resolved)
+
+	// A miss without adapter evidence still fails closed.
+	_, err = normalizer.reconcilePayment(context.Background(), "nowpayments", "5957104571", "")
+	require.ErrorIs(t, err, domain.ErrInvalidWebhook)
 }
 
 func TestResolvePaymentValidation(t *testing.T) {

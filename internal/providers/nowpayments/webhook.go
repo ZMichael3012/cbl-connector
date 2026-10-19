@@ -70,7 +70,7 @@ func (a *Adapter) VerifyWebhook(headers map[string][]string, rawBody []byte) (do
 	return domain.CanonicalEvent{
 		Type:           state,
 		PaymentID:      decoded.OrderID,
-		GatewayID:      decoded.PaymentID,
+		GatewayID:      string(decoded.PaymentID),
 		Provider:       "nowpayments",
 		RawStatus:      decoded.PaymentStatus,
 		Network:        strings.ToLower(strings.TrimSpace(decoded.PayCurrency)),

@@ -651,3 +651,18 @@ func TestGetPayoutStatusMapping(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, domain.ErrUnknownState))
 }
+
+// TestGetPaymentNumericID verifies the live wire form: payment_id arrives as a
+// JSON number while the invoice id is a quoted string (KI-connector-15).
+func TestGetPaymentNumericID(t *testing.T) {
+	t.Parallel()
+	server := wireServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"payment_id":5957104571,"order_id":"order-1","payment_status":"finished","price_amount":12.34,"actually_paid":12.34,"pay_currency":"usdttrc20","updated_at":"2026-10-17T12:00:00Z"}`))
+	})
+	adapter, err := nowpayments.New(testConfig(server.URL))
+	require.NoError(t, err)
+	status, err := adapter.GetPayment(context.Background(), "5957104571")
+	require.NoError(t, err)
+	assert.Equal(t, "5957104571", status.GatewayID)
+	assert.Equal(t, domain.StateConfirmed, status.State)
+}

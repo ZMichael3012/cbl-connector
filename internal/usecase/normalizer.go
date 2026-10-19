@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -257,14 +258,22 @@ func (n *Normalizer) fetchCanonical(ctx context.Context, raw *eventsv1.GatewayWe
 // reconcilePayment attributes the fetched status to a platform payment: the
 // invoice mapping is authoritative, an adapter-provided id must either match it
 // or stand alone when no mapping is configured, and a contradiction fails closed.
+// A mapping miss with an adapter-provided id falls through to the adapter id:
+// the NOWPayments IPN carries the provider payment id while the mapping stores
+// the invoice id, and the fetched order_id echoes the platform payment
+// (KI-connector-15).
 func (n *Normalizer) reconcilePayment(ctx context.Context, provider, gatewayID, adapterPaymentID string) (string, error) {
 	mapped := ""
 	if n.mapping != nil {
 		resolved, err := n.resolvePayment(ctx, provider, gatewayID)
-		if err != nil {
+		switch {
+		case err == nil:
+			mapped = resolved
+		case errors.Is(err, domain.ErrProviderInvoiceNotFound):
+			// No mapping for this gateway id: the adapter evidence decides.
+		default:
 			return "", err
 		}
-		mapped = resolved
 	}
 	adapterPaymentID = strings.TrimSpace(adapterPaymentID)
 	switch {

@@ -171,13 +171,37 @@ type invoiceResponse struct {
 
 // paymentResponse describes the NOWPayments payment body.
 type paymentResponse struct {
-	PaymentID     string      `json:"payment_id"`
+	PaymentID     idText      `json:"payment_id"`
 	OrderID       string      `json:"order_id"`
 	PaymentStatus string      `json:"payment_status"`
 	PriceAmount   json.Number `json:"price_amount"`
 	ActuallyPaid  json.Number `json:"actually_paid"`
 	PayCurrency   string      `json:"pay_currency"`
 	UpdatedAt     string      `json:"updated_at"`
+}
+
+// idText accepts a JSON number or a quoted string: the live NOW payment wire
+// returns payment_id as a number while the stand profile and older payloads
+// quote it (found live, KI-connector-15).
+type idText string
+
+// UnmarshalJSON decodes a number or a string into the identifier text.
+func (v *idText) UnmarshalJSON(data []byte) error {
+	text := strings.TrimSpace(string(data))
+	if text == "null" {
+		*v = ""
+		return nil
+	}
+	if len(text) >= 2 && text[0] == '"' && text[len(text)-1] == '"' {
+		var quoted string
+		if err := json.Unmarshal(data, &quoted); err != nil {
+			return err
+		}
+		*v = idText(quoted)
+		return nil
+	}
+	*v = idText(text)
+	return nil
 }
 
 // priceCurrencyFor resolves the NOWPayments price currency of an amount (fiat
@@ -338,7 +362,7 @@ func (a *Adapter) LookupByOrderID(ctx context.Context, orderID string) (domain.P
 			decoded = envelope.paymentResponse
 		}
 	}
-	return a.statusOf(decoded.PaymentID, decoded)
+	return a.statusOf(string(decoded.PaymentID), decoded)
 }
 
 // statusOf maps a payment body into the canonical status; an unknown status
@@ -372,7 +396,12 @@ func (a *Adapter) statusOf(gatewayID string, decoded paymentResponse) (domain.Pa
 		network = strings.ToLower(strings.TrimSpace(decoded.PayCurrency))
 	}
 	return domain.PaymentStatus{
-		GatewayID:      gatewayID,
+		GatewayID: gatewayID,
+		// PaymentID is the platform payment echoed in order_id: the live IPN
+		// carries the provider payment id, so the mapping lookup by the gateway
+		// id misses and the fetched order_id is the resolution evidence
+		// (KI-connector-15).
+		PaymentID:      strings.TrimSpace(decoded.OrderID),
 		Provider:       "nowpayments",
 		State:          state,
 		RawStatus:      decoded.PaymentStatus,
@@ -419,7 +448,7 @@ func (a *Adapter) ExportPayments(ctx context.Context, req domain.ExportRequest) 
 // odd row cannot block the reconciliation window.
 func (a *Adapter) exportStatusOf(decoded paymentResponse) domain.PaymentStatus {
 	status := domain.PaymentStatus{
-		GatewayID: decoded.PaymentID,
+		GatewayID: string(decoded.PaymentID),
 		PaymentID: decoded.OrderID,
 		Provider:  "nowpayments",
 		State:     paymentStates[decoded.PaymentStatus],

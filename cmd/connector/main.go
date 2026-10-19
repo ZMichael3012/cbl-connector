@@ -196,6 +196,7 @@ func main() {
 			APIKey:        os.Getenv("CONNECTOR_NOWPAYMENTS_API_KEY"),
 			IPNSecret:     []byte(os.Getenv("CONNECTOR_NOWPAYMENTS_IPN_SECRET")),
 			PriceCurrency: os.Getenv("CONNECTOR_NOWPAYMENTS_PRICE_CURRENCY"),
+			CallbackURL:   os.Getenv("CONNECTOR_NOWPAYMENTS_CALLBACK_URL"),
 			Capabilities:  capabilities,
 			Timeout:       durationEnv(log, "CONNECTOR_NOWPAYMENTS_TIMEOUT", 10*time.Second),
 		})

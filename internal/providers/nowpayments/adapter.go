@@ -50,6 +50,9 @@ type Config struct {
 	// directly (T-CONNECTOR-28); any other asset needs a rate and is rejected.
 	// Empty means "USD".
 	PriceCurrency string
+	// CallbackURL sets the per-invoice IPN URL (our ingress); empty leaves the
+	// account-level dashboard setting in charge.
+	CallbackURL string
 	// Capabilities sets the network rows; Provider is forced to "nowpayments".
 	Capabilities domain.Capabilities
 	// Timeout sets the HTTP client timeout; <= 0 means the default.
@@ -64,6 +67,7 @@ type Adapter struct {
 	apiKey        string
 	ipnSecret     []byte
 	priceCurrency string
+	callbackURL   string
 	capabilities  domain.Capabilities
 	decimals      map[string]uint32
 	client        *http.Client
@@ -138,6 +142,7 @@ func New(cfg Config) (*Adapter, error) {
 		baseURL:       strings.TrimRight(base, "/"),
 		apiKey:        apiKey,
 		ipnSecret:     cfg.IPNSecret,
+		callbackURL:   strings.TrimSpace(cfg.CallbackURL),
 		priceCurrency: priceCurrency,
 		capabilities:  capabilities,
 		decimals:      decimals,
@@ -224,6 +229,11 @@ func (a *Adapter) CreateInvoice(ctx context.Context, req domain.CreateInvoiceReq
 		"price_amount":   json.RawMessage(priceText),
 		"price_currency": priceCurrency,
 		"pay_currency":   networkKey,
+	}
+	if a.callbackURL != "" {
+		// The per-invoice IPN URL points the provider at our ingress directly,
+		// so the account-level dashboard setting is not required (T-CONNECTOR-30).
+		body["ipn_callback_url"] = a.callbackURL
 	}
 	payload, err := a.request(ctx, http.MethodPost, "/v1/invoice", body, domain.ErrRejected)
 	if err != nil {

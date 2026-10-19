@@ -57,6 +57,37 @@ func paymentBody(status string, actuallyPaid float64) string {
 }
 
 // createRequest builds the fixture invoice request.
+// TestCreateInvoiceCallbackURL verifies the per-invoice IPN URL is sent only
+// when configured (T-CONNECTOR-30).
+func TestCreateInvoiceCallbackURL(t *testing.T) {
+	t.Parallel()
+	var sent map[string]any
+	server := wireServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &sent)
+		_, _ = w.Write([]byte(`{"id":"np-gw-1","order_id":"order-1","price_amount":12.34,"price_currency":"USD","pay_currency":"usdttrc20","invoice_url":"https://pay.nowpayments.io/invoice/1"}`))
+	})
+	config := testConfig(server.URL)
+	config.CallbackURL = "https://hooks.example.test/hooks/nowpayments/stand"
+	adapter, err := nowpayments.New(config)
+	require.NoError(t, err)
+	_, err = adapter.CreateInvoice(context.Background(), createRequest())
+	require.NoError(t, err)
+	assert.Equal(t, "https://hooks.example.test/hooks/nowpayments/stand", sent["ipn_callback_url"])
+
+	sent = nil
+	server2 := wireServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &sent)
+		_, _ = w.Write([]byte(`{"id":"np-gw-1","order_id":"order-1","price_amount":12.34,"price_currency":"USD","pay_currency":"usdttrc20","invoice_url":"https://pay.nowpayments.io/invoice/1"}`))
+	})
+	adapter2, err := nowpayments.New(testConfig(server2.URL))
+	require.NoError(t, err)
+	_, err = adapter2.CreateInvoice(context.Background(), createRequest())
+	require.NoError(t, err)
+	assert.NotContains(t, sent, "ipn_callback_url", "without a configured callback URL the field is omitted")
+}
+
 func createRequest() domain.CreateInvoiceRequest {
 	return domain.CreateInvoiceRequest{
 		IdempotencyKey: "k-1",

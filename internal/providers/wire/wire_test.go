@@ -2,13 +2,41 @@ package wire_test
 
 import (
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cbl/cbl-kit/money"
+
 	"github.com/cbl/cbl-connector/internal/providers/wire"
 )
+
+func TestFiatPriceHelpers(t *testing.T) {
+	t.Parallel()
+
+	currency, err := wire.ValidatePriceCurrency("")
+	require.NoError(t, err)
+	assert.Equal(t, "USD", currency, "an empty config means the default")
+	_, err = wire.ValidatePriceCurrency("USDT")
+	require.Error(t, err, "a stablecoin price currency is rejected")
+	_, err = wire.ValidatePriceCurrency("1$A")
+	require.Error(t, err, "a non-letter code is rejected")
+
+	priced, err := wire.FiatPriceCurrency("USDT", "EUR")
+	require.NoError(t, err)
+	assert.Equal(t, "EUR", priced, "a stablecoin is priced at par in the configured fiat")
+	_, err = wire.FiatPriceCurrency("ETH", "EUR")
+	require.Error(t, err, "an asset without a rate is rejected")
+
+	text, err := wire.FiatPriceAmount(money.Money{MinorUnits: 12345000, Asset: "USDT", Decimals: 6}, "USD", 6)
+	require.NoError(t, err)
+	assert.Equal(t, "12.35", text, "the par price rounds half-up to cents")
+
+	_, err = wire.FiatPriceAmount(money.Money{MinorUnits: math.MaxInt64, Asset: "USDT", Decimals: 6}, "USD", 6)
+	require.Error(t, err, "the conversion is overflow-checked")
+}
 
 func TestRedact(t *testing.T) {
 	t.Parallel()

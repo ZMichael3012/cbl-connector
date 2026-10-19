@@ -181,7 +181,7 @@ func nowPaymentsFixtures() ProfileFixtures {
 		Provider:         "nowpayments",
 		CreatePath:       "POST /v1/invoice",
 		CreateStatus:     201,
-		CreateTemplate:   []byte(fmt.Sprintf(`{"id":"np-gw-1","order_id":{{request.order_id}},"price_amount":12.34,"price_currency":"USDT","pay_currency":"usdttrc20","invoice_url":"https://mock-provider.local/nowpayments/checkout/np-gw-1","created_at":"2026-10-17T12:00:00Z","expiration_estimate_date":%q}`, expiration)),
+		CreateTemplate:   []byte(fmt.Sprintf(`{"id":"np-gw-1","order_id":{{request.order_id}},"price_amount":12.34,"price_currency":"USD","pay_currency":"usdttrc20","invoice_url":"https://mock-provider.local/nowpayments/checkout/np-gw-1","created_at":"2026-10-17T12:00:00Z","expiration_estimate_date":%q}`, expiration)),
 		CreateGatewayID:  gatewayID,
 		OrderField:       "order_id",
 		CheckNetwork:     "usdttrc20",
@@ -218,11 +218,11 @@ func coinGateFixtures() ProfileFixtures {
 		{Raw: "refunded", Expected: domain.StateFailed},
 	}
 	payment := func(raw string) []byte {
-		return []byte(fmt.Sprintf(`{"id":1042,"status":%q,"order_id":"order-1","price_amount":"12.340000","price_currency":"USDT","pay_amount":"12.340000","pay_currency":"usdt_trc20","payment_address":"MOCKADDR","created_at":"2026-10-17T12:00:00Z"}`, raw))
+		return []byte(fmt.Sprintf(`{"id":1042,"status":%q,"order_id":"order-1","price_amount":"12.34","price_currency":"USD","pay_amount":"12.340000","pay_currency":"usdt_trc20","payment_address":"MOCKADDR","created_at":"2026-10-17T12:00:00Z"}`, raw))
 	}
-	valid := []byte(fmt.Sprintf(`{"id":1042,"order_id":"order-1","status":"paid","price_amount":"12.340000","price_currency":"USDT","pay_amount":"12.340000","pay_currency":"usdt_trc20","token":%q,"created_at":"2026-10-17T12:00:00Z"}`, string(secret)))
-	tampered := []byte(`{"id":1042,"order_id":"order-1","status":"paid","price_amount":"12.340000","price_currency":"USDT","pay_amount":"12.340000","pay_currency":"usdt_trc20","token":"wrong-token","created_at":"2026-10-17T12:00:00Z"}`)
-	missing := []byte(`{"id":1042,"order_id":"order-1","status":"paid","price_amount":"12.340000","price_currency":"USDT","pay_amount":"12.340000","pay_currency":"usdt_trc20","created_at":"2026-10-17T12:00:00Z"}`)
+	valid := []byte(fmt.Sprintf(`{"id":1042,"order_id":"order-1","status":"paid","price_amount":"12.34","price_currency":"USD","pay_amount":"12.340000","pay_currency":"usdt_trc20","token":%q,"created_at":"2026-10-17T12:00:00Z"}`, string(secret)))
+	tampered := []byte(`{"id":1042,"order_id":"order-1","status":"paid","price_amount":"12.34","price_currency":"USD","pay_amount":"12.340000","pay_currency":"usdt_trc20","token":"wrong-token","created_at":"2026-10-17T12:00:00Z"}`)
+	missing := []byte(`{"id":1042,"order_id":"order-1","status":"paid","price_amount":"12.34","price_currency":"USD","pay_amount":"12.340000","pay_currency":"usdt_trc20","created_at":"2026-10-17T12:00:00Z"}`)
 	return ProfileFixtures{
 		Provider:         "coingate",
 		CreatePath:       "POST /v2/orders",

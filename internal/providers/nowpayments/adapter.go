@@ -43,6 +43,13 @@ type Config struct {
 	APIKey string
 	// IPNSecret verifies the canonical JSON HMAC-SHA512 signature.
 	IPNSecret []byte
+	// PriceCurrency sets the fiat currency of stablecoin order prices: the
+	// sandbox cannot estimate a stablecoin price currency for a stablecoin pay
+	// currency (verified live 19.10.2026), so a stablecoin asset is priced at
+	// par in this currency while the configured currency itself is priced
+	// directly (T-CONNECTOR-28); any other asset needs a rate and is rejected.
+	// Empty means "USD".
+	PriceCurrency string
 	// Capabilities sets the network rows; Provider is forced to "nowpayments".
 	Capabilities domain.Capabilities
 	// Timeout sets the HTTP client timeout; <= 0 means the default.
@@ -53,12 +60,13 @@ type Config struct {
 
 // Adapter implements domain.PaymentGateway plus the optional SPI v1 interfaces.
 type Adapter struct {
-	baseURL      string
-	apiKey       string
-	ipnSecret    []byte
-	capabilities domain.Capabilities
-	decimals     map[string]uint32
-	client       *http.Client
+	baseURL       string
+	apiKey        string
+	ipnSecret     []byte
+	priceCurrency string
+	capabilities  domain.Capabilities
+	decimals      map[string]uint32
+	client        *http.Client
 }
 
 var (
@@ -89,6 +97,10 @@ func New(cfg Config) (*Adapter, error) {
 	}
 	if len(cfg.Capabilities.Networks) == 0 {
 		return nil, fmt.Errorf("%w: at least one network capability is required", ErrConfiguration)
+	}
+	priceCurrency, err := providerwire.ValidatePriceCurrency(cfg.PriceCurrency)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrConfiguration, err)
 	}
 	timeout := cfg.Timeout
 	if timeout <= 0 {
@@ -123,12 +135,13 @@ func New(cfg Config) (*Adapter, error) {
 		decimals[asset] = scale
 	}
 	return &Adapter{
-		baseURL:      strings.TrimRight(base, "/"),
-		apiKey:       apiKey,
-		ipnSecret:    cfg.IPNSecret,
-		capabilities: capabilities,
-		decimals:     decimals,
-		client:       client,
+		baseURL:       strings.TrimRight(base, "/"),
+		apiKey:        apiKey,
+		ipnSecret:     cfg.IPNSecret,
+		priceCurrency: priceCurrency,
+		capabilities:  capabilities,
+		decimals:      decimals,
+		client:        client,
 	}, nil
 }
 
@@ -162,9 +175,30 @@ type paymentResponse struct {
 	UpdatedAt     string      `json:"updated_at"`
 }
 
+// priceCurrencyFor resolves the NOWPayments price currency of an amount (fiat
+// at par for stablecoins, T-CONNECTOR-28).
+func (a *Adapter) priceCurrencyFor(asset string) (string, error) {
+	currency, err := providerwire.FiatPriceCurrency(asset, a.priceCurrency)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", domain.ErrRejected, err)
+	}
+	return currency, nil
+}
+
+// priceAmount renders the platform amount as the NOWPayments order price (fiat
+// at par, half-up to cents); the conversion is overflow-checked.
+func (a *Adapter) priceAmount(amount money.Money, scale uint32) (string, error) {
+	price, err := providerwire.FiatPriceAmount(amount, a.priceCurrency, scale)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", domain.ErrRejected, err)
+	}
+	return price, nil
+}
+
 // CreateInvoice creates a hosted invoice in the provider.
 func (a *Adapter) CreateInvoice(ctx context.Context, req domain.CreateInvoiceRequest) (domain.Invoice, error) {
-	if _, err := a.ensureAmountScale(req.Amount); err != nil {
+	scale, err := a.ensureAmountScale(req.Amount)
+	if err != nil {
 		return domain.Invoice{}, err
 	}
 	networkKey := strings.ToLower(strings.TrimSpace(req.Network))
@@ -177,10 +211,18 @@ func (a *Adapter) CreateInvoice(ctx context.Context, req domain.CreateInvoiceReq
 	if !strings.EqualFold(row.Asset, req.Amount.Asset) {
 		return domain.Invoice{}, fmt.Errorf("%w: network %q carries asset %q, not %q", domain.ErrRejected, networkKey, row.Asset, req.Amount.Asset)
 	}
+	priceCurrency, err := a.priceCurrencyFor(req.Amount.Asset)
+	if err != nil {
+		return domain.Invoice{}, err
+	}
+	priceText, err := a.priceAmount(req.Amount, scale)
+	if err != nil {
+		return domain.Invoice{}, err
+	}
 	body := map[string]any{
 		"order_id":       req.PaymentID,
-		"price_amount":   json.RawMessage(req.Amount.String()),
-		"price_currency": strings.ToUpper(strings.TrimSpace(req.Amount.Asset)),
+		"price_amount":   json.RawMessage(priceText),
+		"price_currency": priceCurrency,
 		"pay_currency":   networkKey,
 	}
 	payload, err := a.request(ctx, http.MethodPost, "/v1/invoice", body, domain.ErrRejected)
@@ -194,9 +236,21 @@ func (a *Adapter) CreateInvoice(ctx context.Context, req domain.CreateInvoiceReq
 	if decoded.ID == "" {
 		return domain.Invoice{}, errors.New("nowpayments: invoice response has no id")
 	}
-	amount, err := a.parseAmount(decoded.PriceAmount, decoded.PriceCurrency)
+	if !strings.EqualFold(strings.TrimSpace(decoded.PriceCurrency), priceCurrency) {
+		return domain.Invoice{}, fmt.Errorf("%w: provider invoice price currency %q does not match %q", domain.ErrRejected, truncateText([]byte(decoded.PriceCurrency)), priceCurrency)
+	}
+	// The provider price must echo the rendered fiat price: a drifted price
+	// would mis-attribute the deposit against the platform amount.
+	expected, err := money.Parse(priceText, priceCurrency, providerwire.FiatScale)
 	if err != nil {
-		return domain.Invoice{}, err
+		return domain.Invoice{}, fmt.Errorf("nowpayments: parse rendered price: %w", err)
+	}
+	echo, err := money.Parse(decoded.PriceAmount.String(), priceCurrency, providerwire.FiatScale)
+	if err != nil {
+		return domain.Invoice{}, fmt.Errorf("%w: provider invoice price is not a valid %s amount", domain.ErrRejected, priceCurrency)
+	}
+	if echo.MinorUnits != expected.MinorUnits {
+		return domain.Invoice{}, fmt.Errorf("%w: provider invoice price %s does not match the request", domain.ErrRejected, truncateText([]byte(decoded.PriceAmount.String())))
 	}
 	expiresAt := req.ExpiresAt.UTC()
 	if decoded.ExpirationEstimateDate != "" {
@@ -214,8 +268,10 @@ func (a *Adapter) CreateInvoice(ctx context.Context, req domain.CreateInvoiceReq
 		Provider:    "nowpayments",
 		CheckoutURL: decoded.InvoiceURL,
 		Network:     req.Network,
-		Amount:      amount,
-		ExpiresAt:   expiresAt,
+		// The platform amount is what the payment service expects; the fiat
+		// price is the provider-side representation at par (T-CONNECTOR-28).
+		Amount:    req.Amount,
+		ExpiresAt: expiresAt,
 	}, nil
 }
 
@@ -449,19 +505,6 @@ func (a *Adapter) GetPayout(ctx context.Context, gatewayPayoutID string) (domain
 		return domain.PayoutStatus{}, fmt.Errorf("%w: payout status %q", domain.ErrUnknownState, decoded.Status)
 	}
 	return domain.PayoutStatus{State: state}, nil
-}
-
-// parseAmount parses a provider amount at the configured asset scale.
-func (a *Adapter) parseAmount(number json.Number, asset string) (money.Money, error) {
-	decimals, err := a.decimalsFor(asset)
-	if err != nil {
-		return money.Money{}, err
-	}
-	parsed, err := money.ParseJSONNumber(number, strings.ToUpper(strings.TrimSpace(asset)), decimals)
-	if err != nil {
-		return money.Money{}, fmt.Errorf("nowpayments: parse amount: %w", err)
-	}
-	return parsed, nil
 }
 
 // resolvePayAsset resolves the configured row of a pay currency code by the

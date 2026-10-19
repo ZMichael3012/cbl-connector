@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -30,20 +29,7 @@ const (
 	defaultTimeout = 10 * time.Second
 	// maxResponseBytes bounds a provider response body.
 	maxResponseBytes = 1 << 20
-	// defaultPriceCurrency prices stablecoin orders when the config omits the
-	// currency (T-CONNECTOR-27).
-	defaultPriceCurrency = "USD"
-	// fiatScale is the price scale of CoinGate order prices (cents).
-	fiatScale = 2
 )
-
-// stablecoinAssets are priced at par in the configured fiat price currency:
-// CoinGate rejects stablecoins as price currencies (KI-connector-14 extension,
-// verified live 19.10.2026), and the platform amount is already denominated in
-// the stablecoin.
-var stablecoinAssets = map[string]struct{}{
-	"USDT": {}, "USDC": {}, "DAI": {}, "GUSD": {}, "BUSD": {}, "USDP": {},
-}
 
 // ErrConfiguration reports an invalid adapter configuration.
 var ErrConfiguration = errors.New("coingate: invalid configuration")
@@ -116,20 +102,9 @@ func New(cfg Config) (*Adapter, error) {
 	if len(cfg.Capabilities.Networks) == 0 {
 		return nil, fmt.Errorf("%w: at least one network capability is required", ErrConfiguration)
 	}
-	priceCurrency := strings.ToUpper(strings.TrimSpace(cfg.PriceCurrency))
-	if priceCurrency == "" {
-		priceCurrency = defaultPriceCurrency
-	}
-	if len(priceCurrency) != 3 {
-		return nil, fmt.Errorf("%w: price currency %q must be a 3-letter code", ErrConfiguration, cfg.PriceCurrency)
-	}
-	for i := 0; i < len(priceCurrency); i++ {
-		if priceCurrency[i] < 'A' || priceCurrency[i] > 'Z' {
-			return nil, fmt.Errorf("%w: price currency %q must be 3 ASCII letters", ErrConfiguration, cfg.PriceCurrency)
-		}
-	}
-	if _, isStable := stablecoinAssets[priceCurrency]; isStable {
-		return nil, fmt.Errorf("%w: price currency %q is a stablecoin: CoinGate order prices are fiat", ErrConfiguration, priceCurrency)
+	priceCurrency, err := providerwire.ValidatePriceCurrency(cfg.PriceCurrency)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrConfiguration, err)
 	}
 	timeout := cfg.Timeout
 	if timeout <= 0 {
@@ -200,51 +175,25 @@ type orderResponse struct {
 // configured fiat, and anything else is rejected until a real rate is wired
 // (T-CONNECTOR-27).
 func (a *Adapter) priceCurrencyFor(asset string) (string, error) {
-	upper := strings.ToUpper(strings.TrimSpace(asset))
-	if upper == a.priceCurrency {
-		return upper, nil
+	currency, err := providerwire.FiatPriceCurrency(asset, a.priceCurrency)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", domain.ErrRejected, err)
 	}
-	if _, ok := stablecoinAssets[upper]; ok {
-		return a.priceCurrency, nil
-	}
-	return "", fmt.Errorf("%w: asset %q cannot be priced in %s: a rate is not wired yet", domain.ErrRejected, asset, a.priceCurrency)
+	return currency, nil
 }
 
-// priceAmount renders the platform amount as the CoinGate order price: the
-// amount is converted to the fiat scale (half-up) and denominated in the
-// configured price currency, because CoinGate prices are fiat and a stablecoin
-// order is priced at par (T-CONNECTOR-27). The conversions are
-// overflow-checked: a wrapped price must never reach the provider.
+// priceAmount renders the platform amount as the CoinGate order price (fiat at
+// par, half-up to cents); the conversion is overflow-checked (T-CONNECTOR-27).
 func (a *Adapter) priceAmount(amount money.Money) (string, error) {
 	scale, err := a.decimalsFor(amount.Asset)
 	if err != nil {
 		return "", err
 	}
-	units := amount.MinorUnits
-	switch {
-	case scale > fiatScale:
-		divisor := pow10(scale - fiatScale)
-		if units > math.MaxInt64-divisor/2 {
-			return "", fmt.Errorf("%w: amount is too large to price in %s", domain.ErrRejected, a.priceCurrency)
-		}
-		units = (units + divisor/2) / divisor
-	case scale < fiatScale:
-		factor := pow10(fiatScale - scale)
-		if units > math.MaxInt64/factor {
-			return "", fmt.Errorf("%w: amount is too large to price in %s", domain.ErrRejected, a.priceCurrency)
-		}
-		units *= factor
+	price, err := providerwire.FiatPriceAmount(amount, a.priceCurrency, scale)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", domain.ErrRejected, err)
 	}
-	return money.Money{MinorUnits: units, Asset: a.priceCurrency, Decimals: fiatScale}.String(), nil
-}
-
-// pow10 returns 10^n for the scale conversions of priceAmount.
-func pow10(n uint32) int64 {
-	value := int64(1)
-	for i := uint32(0); i < n; i++ {
-		value *= 10
-	}
-	return value
+	return price, nil
 }
 
 // CreateInvoice creates an order in the provider.
@@ -290,11 +239,11 @@ func (a *Adapter) CreateInvoice(ctx context.Context, req domain.CreateInvoiceReq
 	}
 	// The provider price must echo the rendered fiat price: a drifted price
 	// would mis-attribute the deposit against the platform amount.
-	expected, err := money.Parse(priceText, priceCurrency, fiatScale)
+	expected, err := money.Parse(priceText, priceCurrency, providerwire.FiatScale)
 	if err != nil {
 		return domain.Invoice{}, fmt.Errorf("coingate: parse rendered price: %w", err)
 	}
-	echo, err := money.Parse(decoded.PriceAmount, priceCurrency, fiatScale)
+	echo, err := money.Parse(decoded.PriceAmount, priceCurrency, providerwire.FiatScale)
 	if err != nil {
 		return domain.Invoice{}, fmt.Errorf("%w: provider order price is not a valid %s amount", domain.ErrRejected, priceCurrency)
 	}

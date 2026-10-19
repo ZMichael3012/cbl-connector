@@ -6,8 +6,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"strings"
+
+	"github.com/cbl/cbl-kit/money"
 )
 
 // DecodeArrayOrObject decodes a provider body that may be a JSON array or a
@@ -55,6 +58,89 @@ func Redact(payload []byte, secrets ...string) []byte {
 		}
 	}
 	return []byte(text)
+}
+
+// StablecoinAssets are priced at par in a configured fiat price currency by
+// the hosted providers: CoinGate rejects stablecoins as price currencies and
+// the NOWPayments sandbox cannot estimate a stablecoin price currency for a
+// stablecoin pay currency (both verified live 19.10.2026, T-CONNECTOR-27/28).
+var StablecoinAssets = map[string]struct{}{
+	"USDT": {}, "USDC": {}, "DAI": {}, "GUSD": {}, "BUSD": {}, "USDP": {},
+}
+
+// DefaultPriceCurrency prices stablecoin orders when a provider config omits
+// the currency.
+const DefaultPriceCurrency = "USD"
+
+// FiatScale is the price scale of hosted-provider fiat prices (cents).
+const FiatScale = 2
+
+// ValidatePriceCurrency normalizes and validates a configured fiat price
+// currency: 3 ASCII letters, not a stablecoin (the hosted provider prices are
+// fiat, T-CONNECTOR-27/28). An empty value means the default.
+func ValidatePriceCurrency(raw string) (string, error) {
+	code := strings.ToUpper(strings.TrimSpace(raw))
+	if code == "" {
+		code = DefaultPriceCurrency
+	}
+	if len(code) != 3 {
+		return "", fmt.Errorf("price currency %q must be a 3-letter code", raw)
+	}
+	for i := 0; i < len(code); i++ {
+		if code[i] < 'A' || code[i] > 'Z' {
+			return "", fmt.Errorf("price currency %q must be 3 ASCII letters", raw)
+		}
+	}
+	if _, isStable := StablecoinAssets[code]; isStable {
+		return "", fmt.Errorf("price currency %q is a stablecoin: hosted provider prices are fiat", code)
+	}
+	return code, nil
+}
+
+// FiatPriceCurrency resolves the fiat price currency of an amount: the
+// configured fiat prices itself, a known stablecoin is priced at par in it,
+// and anything else is rejected until a real rate is wired (T-CONNECTOR-27).
+func FiatPriceCurrency(asset, priceCurrency string) (string, error) {
+	upper := strings.ToUpper(strings.TrimSpace(asset))
+	if upper == priceCurrency {
+		return upper, nil
+	}
+	if _, ok := StablecoinAssets[upper]; ok {
+		return priceCurrency, nil
+	}
+	return "", fmt.Errorf("asset %q cannot be priced in %s: a rate is not wired yet", asset, priceCurrency)
+}
+
+// FiatPriceAmount renders an amount as a hosted-provider fiat price: the amount
+// is converted to the fiat scale (half-up) and denominated in the price
+// currency (T-CONNECTOR-27). The conversions are overflow-checked: a wrapped
+// price must never reach the provider.
+func FiatPriceAmount(amount money.Money, priceCurrency string, assetScale uint32) (string, error) {
+	units := amount.MinorUnits
+	switch {
+	case assetScale > FiatScale:
+		divisor := pow10(assetScale - FiatScale)
+		if units > math.MaxInt64-divisor/2 {
+			return "", fmt.Errorf("amount is too large to price in %s", priceCurrency)
+		}
+		units = (units + divisor/2) / divisor
+	case assetScale < FiatScale:
+		factor := pow10(FiatScale - assetScale)
+		if units > math.MaxInt64/factor {
+			return "", fmt.Errorf("amount is too large to price in %s", priceCurrency)
+		}
+		units *= factor
+	}
+	return money.Money{MinorUnits: units, Asset: priceCurrency, Decimals: FiatScale}.String(), nil
+}
+
+// pow10 returns 10^n for the scale conversions of FiatPriceAmount.
+func pow10(n uint32) int64 {
+	value := int64(1)
+	for i := uint32(0); i < n; i++ {
+		value *= 10
+	}
+	return value
 }
 
 // DecodeEnvelopeOrArray decodes a provider list body that may be a bare JSON

@@ -192,11 +192,12 @@ func main() {
 			return
 		}
 		adapter, adapterErr := nowpayments.New(nowpayments.Config{
-			BaseURL:      base,
-			APIKey:       os.Getenv("CONNECTOR_NOWPAYMENTS_API_KEY"),
-			IPNSecret:    []byte(os.Getenv("CONNECTOR_NOWPAYMENTS_IPN_SECRET")),
-			Capabilities: capabilities,
-			Timeout:      durationEnv(log, "CONNECTOR_NOWPAYMENTS_TIMEOUT", 10*time.Second),
+			BaseURL:       base,
+			APIKey:        os.Getenv("CONNECTOR_NOWPAYMENTS_API_KEY"),
+			IPNSecret:     []byte(os.Getenv("CONNECTOR_NOWPAYMENTS_IPN_SECRET")),
+			PriceCurrency: os.Getenv("CONNECTOR_NOWPAYMENTS_PRICE_CURRENCY"),
+			Capabilities:  capabilities,
+			Timeout:       durationEnv(log, "CONNECTOR_NOWPAYMENTS_TIMEOUT", 10*time.Second),
 		})
 		if adapterErr != nil {
 			log.Error("build nowpayments adapter failed", zap.Error(adapterErr))

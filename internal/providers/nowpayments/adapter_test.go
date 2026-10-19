@@ -44,7 +44,7 @@ func testConfig(baseURL string) nowpayments.Config {
 
 // invoiceBody renders a NOWPayments invoice response.
 func invoiceBody(status string, expiration time.Time) string {
-	return `{"id":"np-gw-1","order_id":"order-1","price_amount":12.34,"price_currency":"USDT",` +
+	return `{"id":"np-gw-1","order_id":"order-1","price_amount":12.34,"price_currency":"USD",` +
 		`"pay_currency":"usdttrc20","invoice_url":"https://pay.nowpayments.io/invoice/1",` +
 		`"created_at":"2026-10-17T12:00:00Z","expiration_estimate_date":"` + expiration.UTC().Format(time.RFC3339) + `","status":"` + status + `"}`
 }
@@ -152,7 +152,7 @@ func TestCreateInvoiceExpiryBranches(t *testing.T) {
 	earlier := time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second)
 	server := wireServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"id":"np-gw-1","order_id":"order-1","price_amount":12.34,"price_currency":"USDT","pay_currency":"usdttrc20","invoice_url":"https://pay.nowpayments.io/invoice/1","expiration_estimate_date":"` + earlier.Format(time.RFC3339) + `"}`))
+		_, _ = w.Write([]byte(`{"id":"np-gw-1","order_id":"order-1","price_amount":12.34,"price_currency":"USD","pay_currency":"usdttrc20","invoice_url":"https://pay.nowpayments.io/invoice/1","expiration_estimate_date":"` + earlier.Format(time.RFC3339) + `"}`))
 	})
 	adapter, err := nowpayments.New(testConfig(server.URL))
 	require.NoError(t, err)
@@ -162,7 +162,7 @@ func TestCreateInvoiceExpiryBranches(t *testing.T) {
 
 	absent := wireServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"id":"np-gw-1","order_id":"order-1","price_amount":12.34,"price_currency":"USDT","pay_currency":"usdttrc20","invoice_url":"https://pay.nowpayments.io/invoice/1"}`))
+		_, _ = w.Write([]byte(`{"id":"np-gw-1","order_id":"order-1","price_amount":12.34,"price_currency":"USD","pay_currency":"usdttrc20","invoice_url":"https://pay.nowpayments.io/invoice/1"}`))
 	})
 	adapter, err = nowpayments.New(testConfig(absent.URL))
 	require.NoError(t, err)
@@ -216,6 +216,10 @@ func TestNewValidation(t *testing.T) {
 		"missing key":      func(c *nowpayments.Config) { c.APIKey = "" },
 		"missing ipn":      func(c *nowpayments.Config) { c.IPNSecret = nil },
 		"no networks":      func(c *nowpayments.Config) { c.Capabilities = domain.Capabilities{} },
+		"stablecoin price currency": func(c *nowpayments.Config) {
+			c.PriceCurrency = "USDT"
+		},
+		"non-letter price currency": func(c *nowpayments.Config) { c.PriceCurrency = "1$A" },
 	}
 	for name, mutate := range cases {
 		mutate := mutate
@@ -284,7 +288,8 @@ func TestCreateInvoiceHappyPath(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(captured.body), &sent))
 	assert.Equal(t, "order-1", sent["order_id"])
 	assert.InDelta(t, 12.34, sent["price_amount"], 0.0000001)
-	assert.Equal(t, "USDT", sent["price_currency"])
+	assert.Equal(t, "USD", sent["price_currency"],
+		"the sandbox cannot estimate a stablecoin price currency: the order is fiat-priced at par (T-CONNECTOR-28)")
 	assert.Equal(t, "usdttrc20", sent["pay_currency"])
 
 	assert.Equal(t, "np-gw-1", invoice.GatewayID)
@@ -293,6 +298,38 @@ func TestCreateInvoiceHappyPath(t *testing.T) {
 	assert.Equal(t, "usdttrc20", invoice.Network)
 	assert.Equal(t, int64(12340000), invoice.Amount.MinorUnits)
 	assert.Equal(t, request.ExpiresAt, invoice.ExpiresAt, "a provider expiry beyond the request horizon is clamped")
+}
+
+func TestCreateInvoicePriceGuards(t *testing.T) {
+	t.Parallel()
+
+	// A drifted provider price is rejected.
+	drift := wireServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"np-gw-1","order_id":"order-1","price_amount":12.35,"price_currency":"USD","pay_currency":"usdttrc20","invoice_url":"https://pay.nowpayments.io/invoice/1"}`))
+	})
+	adapter, err := nowpayments.New(testConfig(drift.URL))
+	require.NoError(t, err)
+	_, err = adapter.CreateInvoice(context.Background(), createRequest())
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, domain.ErrRejected), "a price drift must be rejected: %v", err)
+
+	// A non-stablecoin asset cannot be priced in fiat without a rate.
+	eth := testConfig("http://example.test")
+	eth.Capabilities.Networks = map[string]domain.NetworkCapability{
+		"eth": {Asset: "ETH", MinAmount: money.MustParse("0.01", "ETH", 8)},
+	}
+	ethAdapter, err := nowpayments.New(eth)
+	require.NoError(t, err)
+	_, err = ethAdapter.CreateInvoice(context.Background(), domain.CreateInvoiceRequest{
+		IdempotencyKey: "k-eth",
+		PaymentID:      "order-1",
+		Amount:         money.MustParse("0.01", "ETH", 8),
+		Network:        "eth",
+		ExpiresAt:      time.Now().UTC().Add(15 * time.Minute),
+	})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, domain.ErrRejected), "a rate is not wired yet: %v", err)
 }
 
 func TestCreateInvoiceErrorClassification(t *testing.T) {

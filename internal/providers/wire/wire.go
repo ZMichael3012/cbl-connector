@@ -72,12 +72,24 @@ var StablecoinAssets = map[string]struct{}{
 // the currency.
 const DefaultPriceCurrency = "USD"
 
+// fiatPriceCurrencies are the ISO-4217 codes accepted as hosted-provider price
+// currencies: a crypto or unknown code would misprice a stablecoin order at par
+// (CoinGate rejects crypto price currencies server-side, NOWPayments accepts
+// them, so the guard must be client-side; T-CONNECTOR-27/28 review).
+var fiatPriceCurrencies = map[string]struct{}{
+	"AUD": {}, "BGN": {}, "BRL": {}, "CAD": {}, "CHF": {}, "CNY": {}, "CZK": {},
+	"DKK": {}, "EUR": {}, "GBP": {}, "HKD": {}, "HUF": {}, "ILS": {}, "INR": {},
+	"JPY": {}, "KRW": {}, "MXN": {}, "MYR": {}, "NOK": {}, "NZD": {}, "PHP": {},
+	"PLN": {}, "RON": {}, "SEK": {}, "SGD": {}, "THB": {}, "TRY": {}, "USD": {},
+	"ZAR": {},
+}
+
 // FiatScale is the price scale of hosted-provider fiat prices (cents).
 const FiatScale = 2
 
 // ValidatePriceCurrency normalizes and validates a configured fiat price
-// currency: 3 ASCII letters, not a stablecoin (the hosted provider prices are
-// fiat, T-CONNECTOR-27/28). An empty value means the default.
+// currency: 3 ASCII letters from the known fiat allowlist (T-CONNECTOR-27/28).
+// An empty value means the default.
 func ValidatePriceCurrency(raw string) (string, error) {
 	code := strings.ToUpper(strings.TrimSpace(raw))
 	if code == "" {
@@ -91,8 +103,8 @@ func ValidatePriceCurrency(raw string) (string, error) {
 			return "", fmt.Errorf("price currency %q must be 3 ASCII letters", raw)
 		}
 	}
-	if _, isStable := StablecoinAssets[code]; isStable {
-		return "", fmt.Errorf("price currency %q is a stablecoin: hosted provider prices are fiat", code)
+	if _, ok := fiatPriceCurrencies[code]; !ok {
+		return "", fmt.Errorf("price currency %q is not a known fiat currency: hosted provider prices are fiat", code)
 	}
 	return code, nil
 }

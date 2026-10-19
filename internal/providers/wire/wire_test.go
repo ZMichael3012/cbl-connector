@@ -21,8 +21,13 @@ func TestFiatPriceHelpers(t *testing.T) {
 	assert.Equal(t, "USD", currency, "an empty config means the default")
 	_, err = wire.ValidatePriceCurrency("USDT")
 	require.Error(t, err, "a stablecoin price currency is rejected")
+	_, err = wire.ValidatePriceCurrency("BTC")
+	require.Error(t, err, "a crypto price currency is rejected: NOWPayments would accept it and misprice the par order")
 	_, err = wire.ValidatePriceCurrency("1$A")
 	require.Error(t, err, "a non-letter code is rejected")
+	eur, err := wire.ValidatePriceCurrency("eur")
+	require.NoError(t, err)
+	assert.Equal(t, "EUR", eur, "a known fiat is accepted and normalized")
 
 	priced, err := wire.FiatPriceCurrency("USDT", "EUR")
 	require.NoError(t, err)

@@ -484,14 +484,16 @@ Provider exports (17.13):
   variables; the BitPay signing key lives at `deploy/bitpay-test-key.pem`
   (`*.pem` is gitignored) and its PEM content is injected at run time as
   `CONNECTOR_BITPAY_PRIVATE_KEY_PEM`.
-- CoinGate sandbox (`https://api-sandbox.coingate.com/v2`): the stand IP is
+- CoinGate sandbox (`https://api-sandbox.coingate.com`, the API root without
+  `/v2`: the adapter paths carry the prefix): the stand IP is
   Cloudflare-blocked, so every CoinGate call must go through the local NL
   proxy (exit `72.56.22.194`, allowlisted in the CoinGate API app): run the
   connector with `HTTPS_PROXY=http://host.docker.internal:12334` (the Go
   default transport honors it; `NO_PROXY` keeps internal hosts direct). The
   IPN token is our own generated secret; after the KI-connector-14 fix the
   adapter sends it as the order `token`.
-- NOWPayments sandbox (`https://api-sandbox.nowpayments.io/v1`): reachable
+- NOWPayments sandbox (`https://api-sandbox.nowpayments.io`, the API root
+  without `/v1`: the adapter paths carry the prefix): reachable
   directly; creation and `GET /v1/payment/{payment_id}` work with the API key,
   the list/lookup endpoints need a Bearer JWT (deferred, KI-connector-15).
 - BitPay test (`https://test.bitpay.com`): the merchant token is paired to our
@@ -527,5 +529,14 @@ Provider exports (17.13):
   so far are KI-connector-14 (CoinGate), KI-connector-15 (NOWPayments) and
   KI-connector-10 (BitPay, its live run postponed on the account-side mock pay
   blocker); the CoinGate, NOWPayments and BTCPay runs continue.
+- Live evidence (increment B, 19.10.2026): the CoinGate order 476852 was created
+  through ConnectorService (fiat-priced at par, our IPN token and the tunnel
+  callback URL in the body, `checkout_url` mapped from `payment_url`) and
+  `GetGatewayPayment` answers `PENDING`/`new` against the real API; the
+  NOWPayments invoice 4980340924 was created through ConnectorService with the
+  `x-api-key`. Two stand-config traps were fixed: the provider base URLs must be
+  the API roots without the `/v2`/`/v1` prefixes (the adapter paths carry them;
+  a prefixed base doubles the path and every call answers 404 as a business
+  rejection).
 
 

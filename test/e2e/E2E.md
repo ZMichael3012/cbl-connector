@@ -198,7 +198,8 @@ the refund wire shapes.
    `BTC_STAND_STORE_ID`/`BTC_STAND_API_KEY` and wait for the admin gRPC to answer.
 4. Create an invoice through `ConnectorService/CreateInvoice` (100000 sats,
    order id `<fresh UUID>`); the answer carries the provider invoice id and the
-   checkout link.
+   checkout link. Before paying, `GetGatewayPayment` must answer `PENDING` with
+   raw `New` (the read-only pre-deposit state of increment A, T-CONNECTOR-22).
 5. Read the invoice payment address (`GET .../invoices/{id}/payment-methods`), pay
    it from the node (`sendtoaddress`), mine two blocks, then poll
    `GetGatewayPayment` until `CONFIRMED` with `rawStatus` `Settled`.

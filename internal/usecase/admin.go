@@ -31,6 +31,8 @@ type AdminRoutingStore interface {
 	ReplaceWithRevision(ctx context.Context, expected int64, rules []domain.RouteRule) (int64, error)
 	// DisableProvider records a manual disable; already is true for a repeat.
 	DisableProvider(ctx context.Context, provider, reason string) (bool, error)
+	// EnableProvider removes a manual disable; already is true for a repeat.
+	EnableProvider(ctx context.Context, provider string) (bool, error)
 	// ProviderNames returns the distinct provider names present in the rules.
 	ProviderNames(ctx context.Context) ([]string, error)
 	// ListDisabled returns the disabled provider names.
@@ -129,6 +131,29 @@ func (a *AdminRouting) DisableProvider(ctx context.Context, provider, reason str
 	already, err := a.store.DisableProvider(ctx, provider, reason)
 	if err != nil {
 		return false, fmt.Errorf("usecase: disable provider: %w", err)
+	}
+	a.invalidate(ctx)
+	return already, nil
+}
+
+// EnableProvider validates the input, requires the provider to be known through
+// the registry, the rules or the disabled set, and removes the manual disable;
+// the cache is invalidated on every attempt so a re-enabled provider is visible
+// on the next read even when invalidation fails (the TTL bounds staleness).
+func (a *AdminRouting) EnableProvider(ctx context.Context, provider string) (bool, error) {
+	if err := validateProviderName(provider); err != nil {
+		return false, err
+	}
+	known, err := a.knownProviders(ctx)
+	if err != nil {
+		return false, fmt.Errorf("usecase: load known providers: %w", err)
+	}
+	if !known[provider] {
+		return false, fmt.Errorf("%w: %s", domain.ErrProviderNotFound, provider)
+	}
+	already, err := a.store.EnableProvider(ctx, provider)
+	if err != nil {
+		return false, fmt.Errorf("usecase: enable provider: %w", err)
 	}
 	a.invalidate(ctx)
 	return already, nil

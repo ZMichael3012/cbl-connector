@@ -62,6 +62,15 @@ func (s *AdminServer) DisableProvider(ctx context.Context, req *connectorv1.Disa
 	return &connectorv1.DisableProviderResponse{AlreadyDisabled: already}, nil
 }
 
+// EnableProvider removes a manual disable; a repeat is idempotent.
+func (s *AdminServer) EnableProvider(ctx context.Context, req *connectorv1.EnableProviderRequest) (*connectorv1.EnableProviderResponse, error) {
+	already, err := s.admin.EnableProvider(ctx, req.GetProvider())
+	if err != nil {
+		return nil, s.mapError(ctx, err)
+	}
+	return &connectorv1.EnableProviderResponse{AlreadyEnabled: already}, nil
+}
+
 // mapError converts a domain error into a gRPC status; internal details never
 // reach the client.
 func (s *AdminServer) mapError(ctx context.Context, err error) error {

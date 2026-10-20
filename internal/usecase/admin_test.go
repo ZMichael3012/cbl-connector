@@ -23,9 +23,11 @@ type fakeAdminStore struct {
 	loadErr         error
 	replaceErr      error
 	disableErr      error
+	enableErr       error
 	replaceCalls    int
 	replaceExpected int64
 	disableCalls    int
+	enableCalls     int
 	lastReason      string
 }
 
@@ -74,6 +76,20 @@ func (s *fakeAdminStore) DisableProvider(_ context.Context, provider, reason str
 	}
 	already := s.disabled[provider]
 	s.disabled[provider] = true
+	return already, nil
+}
+
+// EnableProvider implements usecase.AdminRoutingStore.
+func (s *fakeAdminStore) EnableProvider(_ context.Context, provider string) (bool, error) {
+	s.enableCalls++
+	if s.enableErr != nil {
+		return false, s.enableErr
+	}
+	already := true
+	if s.disabled != nil && s.disabled[provider] {
+		already = false
+		delete(s.disabled, provider)
+	}
 	return already, nil
 }
 
@@ -250,4 +266,28 @@ func TestAdminCacheFailureIsLoggedNotFatal(t *testing.T) {
 	_, _, err := admin.PutRules(context.Background(), 0, nil)
 	require.NoError(t, err, "the TTL bounds staleness, the operation succeeds")
 	assert.Equal(t, 1, cache.calls)
+}
+
+func TestAdminEnableProvider(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeAdminStore{providerNames: []string{"mock"}, disabled: map[string]bool{"mock": true}}
+	cache := &fakeInvalidator{}
+	admin := usecase.NewAdminRouting(store, cache, nil, nil)
+
+	already, err := admin.EnableProvider(context.Background(), "mock")
+	require.NoError(t, err)
+	assert.False(t, already)
+	assert.Equal(t, 1, cache.calls)
+
+	already, err = admin.EnableProvider(context.Background(), "mock")
+	require.NoError(t, err)
+	assert.True(t, already, "a repeat is idempotent")
+	assert.Equal(t, 2, cache.calls, "every attempt invalidates the cache")
+
+	_, err = admin.EnableProvider(context.Background(), "unknown")
+	require.ErrorIs(t, err, domain.ErrProviderNotFound)
+
+	_, err = admin.EnableProvider(context.Background(), "")
+	require.ErrorIs(t, err, domain.ErrInvalidAdminInput)
 }

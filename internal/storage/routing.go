@@ -90,6 +90,17 @@ func (r *RouteRulesRepository) DisableProvider(ctx context.Context, provider, re
 	return result.RowsAffected == 0, nil
 }
 
+// EnableProvider removes a manual provider disable; already is true when the
+// provider was enabled before (the delete is idempotent, CBL-17.15).
+func (r *RouteRulesRepository) EnableProvider(ctx context.Context, provider string) (bool, error) {
+	result := r.db.WithContext(ctx).Exec(
+		`DELETE FROM disabled_providers WHERE provider = ?`, provider)
+	if result.Error != nil {
+		return false, fmt.Errorf("storage: enable provider: %w", result.Error)
+	}
+	return result.RowsAffected == 0, nil
+}
+
 // ListDisabled returns the disabled provider names ordered alphabetically.
 func (r *RouteRulesRepository) ListDisabled(ctx context.Context) ([]string, error) {
 	var names []string

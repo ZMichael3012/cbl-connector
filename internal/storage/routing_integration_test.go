@@ -326,6 +326,14 @@ func TestIntegrationAdminUsecaseDisableFiltersRules(t *testing.T) {
 	_, all, err := admin.GetRules(ctx)
 	require.NoError(t, err)
 	assert.Len(t, all, 3)
+
+	already, err = admin.EnableProvider(ctx, "sandbox")
+	require.NoError(t, err)
+	assert.False(t, already)
+
+	active, err = source.Load(ctx)
+	require.NoError(t, err)
+	assert.Len(t, active, 2, "the re-enabled provider returns to the rule source")
 }
 
 // TestIntegrationAdminDisableSurvivesRuleReplacement verifies the review

@@ -24,6 +24,7 @@ type fakeAdminStore struct {
 	names      []string
 	replaceErr error
 	disableErr error
+	enableErr  error
 }
 
 // Revision implements usecase.AdminRoutingStore.
@@ -46,6 +47,14 @@ func (s *fakeAdminStore) ReplaceWithRevision(_ context.Context, _ int64, rules [
 func (s *fakeAdminStore) DisableProvider(context.Context, string, string) (bool, error) {
 	if s.disableErr != nil {
 		return false, s.disableErr
+	}
+	return false, nil
+}
+
+// EnableProvider implements usecase.AdminRoutingStore.
+func (s *fakeAdminStore) EnableProvider(context.Context, string) (bool, error) {
+	if s.enableErr != nil {
+		return false, s.enableErr
 	}
 	return false, nil
 }
@@ -163,6 +172,19 @@ func TestDisableProviderConversion(t *testing.T) {
 	assert.False(t, response.GetAlreadyDisabled())
 
 	_, err = server.DisableProvider(context.Background(), &connectorv1.DisableProviderRequest{Provider: "unknown"})
+	require.Error(t, err)
+	assert.Equal(t, codes.NotFound, status.Code(err))
+}
+
+func TestEnableProviderConversion(t *testing.T) {
+	t.Parallel()
+
+	server := newAdmin(&fakeAdminStore{names: []string{"mock"}})
+	response, err := server.EnableProvider(context.Background(), &connectorv1.EnableProviderRequest{Provider: "mock"})
+	require.NoError(t, err)
+	assert.False(t, response.GetAlreadyEnabled())
+
+	_, err = server.EnableProvider(context.Background(), &connectorv1.EnableProviderRequest{Provider: "unknown"})
 	require.Error(t, err)
 	assert.Equal(t, codes.NotFound, status.Code(err))
 }

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cbl/cbl-kit/money"
+	"github.com/ZMichael3012/cbl-kit/money"
 
 	"github.com/cbl/cbl-connector/internal/domain"
 )

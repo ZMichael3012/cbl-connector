@@ -16,14 +16,14 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 
-	commonv1 "github.com/cbl/cbl-protos/gen/go/billing/common/v1"
-	eventsv1 "github.com/cbl/cbl-protos/gen/go/billing/events/v1"
+	commonv1 "github.com/ZMichael3012/cbl-protos/gen/go/billing/common/v1"
+	eventsv1 "github.com/ZMichael3012/cbl-protos/gen/go/billing/events/v1"
 
-	"github.com/cbl/cbl-kit/inbox"
-	"github.com/cbl/cbl-kit/inbox/kafkaconsumer"
-	"github.com/cbl/cbl-kit/money"
-	"github.com/cbl/cbl-kit/outbox"
-	"github.com/cbl/cbl-kit/outbox/kafkapub"
+	"github.com/ZMichael3012/cbl-kit/inbox"
+	"github.com/ZMichael3012/cbl-kit/inbox/kafkaconsumer"
+	"github.com/ZMichael3012/cbl-kit/money"
+	"github.com/ZMichael3012/cbl-kit/outbox"
+	"github.com/ZMichael3012/cbl-kit/outbox/kafkapub"
 
 	"github.com/cbl/cbl-connector/internal/domain"
 	"github.com/cbl/cbl-connector/internal/storage"

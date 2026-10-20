@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cbl/cbl-kit/webhooksig"
+	"github.com/ZMichael3012/cbl-kit/webhooksig"
 
 	"github.com/cbl/cbl-connector/internal/conformance"
 	"github.com/cbl/cbl-connector/internal/domain"

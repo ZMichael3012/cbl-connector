@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cbl/cbl-kit/ratelimit"
+	"github.com/ZMichael3012/cbl-kit/ratelimit"
 
 	"github.com/cbl/cbl-connector/internal/domain"
 	"github.com/cbl/cbl-connector/internal/gateway"

@@ -7,14 +7,14 @@ import (
 	"testing"
 	"time"
 
-	eventsv1 "github.com/cbl/cbl-protos/gen/go/billing/events/v1"
+	eventsv1 "github.com/ZMichael3012/cbl-protos/gen/go/billing/events/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/cbl/cbl-kit/inbox"
-	"github.com/cbl/cbl-kit/money"
+	"github.com/ZMichael3012/cbl-kit/inbox"
+	"github.com/ZMichael3012/cbl-kit/money"
 
 	"github.com/cbl/cbl-connector/internal/domain"
 )

@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/cbl/cbl-kit/money"
-	"github.com/cbl/cbl-kit/webhooksig"
+	"github.com/ZMichael3012/cbl-kit/money"
+	"github.com/ZMichael3012/cbl-kit/webhooksig"
 
 	"github.com/cbl/cbl-connector/internal/domain"
 )

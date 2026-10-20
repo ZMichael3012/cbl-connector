@@ -26,7 +26,7 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 
-	"github.com/cbl/cbl-kit/money"
+	"github.com/ZMichael3012/cbl-kit/money"
 
 	"github.com/cbl/cbl-connector/internal/domain"
 	providerwire "github.com/cbl/cbl-connector/internal/providers/wire"

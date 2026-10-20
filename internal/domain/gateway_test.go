@@ -6,8 +6,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ZMichael3012/cbl-kit/money"
 	"github.com/cbl/cbl-connector/internal/domain"
-	"github.com/cbl/cbl-kit/money"
 )
 
 func TestCanonicalState(t *testing.T) {

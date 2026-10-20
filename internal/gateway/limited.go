@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cbl/cbl-kit/ratelimit"
+	"github.com/ZMichael3012/cbl-kit/ratelimit"
 
 	"github.com/cbl/cbl-connector/internal/domain"
 )

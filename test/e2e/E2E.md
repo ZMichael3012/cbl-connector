@@ -6,9 +6,8 @@ scripts (customer decision of 16.10.2026, `CBL-002` section 7).
 
 Repository: `cbl-connector`. Stand: `deploy/docker-compose.yml` (postgres, kafka,
 schema-registry, connector and mock-gateway in the `app` profile). The mock-gateway
-service is built from the sibling repository `../cbl-mock-gateway` (both repositories
-must be checked out side by side, the Dockerfile expects the `services/` build
-context); it has no compose healthcheck (KI-08), so the scenarios wait for its
+service is built from the sibling repository `../cbl-mock-gateway` (it must be
+checked out; the build context is its repository root, CBL-0.9); it has no compose healthcheck (KI-08), so the scenarios wait for its
 `/healthz` explicitly. The stand smoke checks that the service starts, migrations
 apply and the webhook normalization pipeline is running; the normalizer end-to-end
 scenario with poison-pill cases runs separately on testcontainers (`make test-e2e`,
@@ -173,8 +172,8 @@ the compose stand covers the smoke and provider-profile scenarios.
 
 Stand: `test/e2e/btcpay-stand/docker-compose.yml` (bitcoind regtest, NBXplorer
 2.5.14, BTCPay Server 2.0.6, postgres, the sink logger, the connector built from
-this repository; the sibling repositories `../cbl-kit` and `../cbl-protos` must
-be checked out, the build context is the `services/` directory). Prerequisites:
+this repository; the cbl-kit and cbl-protos modules are fetched from the GitHub
+origin, the build context is this repository root). Prerequisites:
 the `btcpayserver/btcpayserver:2.0.6`, `nicolasdorier/nbxplorer:2.5.14`,
 `ruimarinho/bitcoin-core:24.0.1`, `postgres:16-alpine` and `python:3.12-alpine`
 images (about 1.5 GiB), roughly 5 minutes of runtime. Run the stand under a

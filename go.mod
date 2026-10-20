@@ -3,8 +3,8 @@ module github.com/cbl/cbl-connector
 go 1.26.0
 
 require (
-	github.com/cbl/cbl-kit v0.0.0-00010101000000-000000000000
-	github.com/cbl/cbl-protos v0.0.0-00010101000000-000000000000
+	github.com/cbl/cbl-kit v0.0.0-20261020024025-deb4e66f1a90
+	github.com/cbl/cbl-protos v0.0.0-20261020024006-5f606b124c94
 	github.com/cenkalti/backoff/v4 v4.2.1
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	github.com/gin-gonic/gin v1.10.0
@@ -110,7 +110,3 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/cbl/cbl-kit => ../cbl-kit
-
-replace github.com/cbl/cbl-protos => ../cbl-protos

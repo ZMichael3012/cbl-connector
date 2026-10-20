@@ -86,8 +86,8 @@ services:
   mock-gateway:
     profiles: ["app"]
     build:
-      context: ../..
-      dockerfile: cbl-mock-gateway/Dockerfile
+      context: ../../cbl-mock-gateway
+      dockerfile: Dockerfile
     environment:
       HTTP_ADDR: ":8120"
       METRICS_ADDR: ":9320"
@@ -100,8 +100,8 @@ services:
   connector:
     profiles: ["app"]
     build:
-      context: ../..
-      dockerfile: cbl-connector/Dockerfile
+      context: ..
+      dockerfile: Dockerfile
     environment:
       HTTP_ADDR: ":8050"
       GRPC_ADDR: ":9050"

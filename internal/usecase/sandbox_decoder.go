@@ -51,11 +51,23 @@ type SandboxDecoder struct {
 	provider string
 }
 
-// NewSandboxDecoder creates a decoder for the provider; the name is stored in lower case.
+// sandboxDecoderProviders is the closed set of profiles served by the sandbox
+// decoder: the platform mock gateway wire contract (CBL-3.5). A real provider
+// is never decoded from the sandbox JSON: it is fetch-mandatory or its adapter
+// owns the decoder (CBL-17.28 review).
+var sandboxDecoderProviders = map[string]struct{}{
+	"mock": {},
+}
+
+// NewSandboxDecoder creates a decoder for the sandbox provider; only the known
+// sandbox profiles are accepted and the name is stored in lower case.
 func NewSandboxDecoder(provider string) (*SandboxDecoder, error) {
 	trimmed := strings.ToLower(strings.TrimSpace(provider))
 	if trimmed == "" {
 		return nil, errors.New("usecase: empty sandbox provider")
+	}
+	if _, known := sandboxDecoderProviders[trimmed]; !known {
+		return nil, fmt.Errorf("usecase: unknown sandbox provider %q", provider)
 	}
 	return &SandboxDecoder{provider: trimmed}, nil
 }

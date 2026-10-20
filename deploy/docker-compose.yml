@@ -109,7 +109,7 @@ services:
       PG_DSN: postgres://cbl:cbl@postgres:5432/connector?sslmode=disable
       KAFKA_BROKERS: kafka:29092
       KAFKA_CONSUMER_GROUP: cbl-connector-webhooks
-      CONNECTOR_SANDBOX_PROVIDERS: mock
+      CONNECTOR_SANDBOX_PROVIDERS: ${CONNECTOR_SANDBOX_PROVIDERS-mock}
       REDIS_ADDR: redis:6379
       # Optional provider allowlist (CSV): the e2e scenarios select one provider;
       # empty means every provider with a configured base URL is enabled.

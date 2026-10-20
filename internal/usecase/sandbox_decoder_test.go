@@ -136,3 +136,12 @@ func TestSandboxDecoderEmptyProvider(t *testing.T) {
 	_, err := usecase.NewSandboxDecoder("  ")
 	require.Error(t, err)
 }
+
+func TestSandboxDecoderRejectsRealProviders(t *testing.T) {
+	t.Parallel()
+
+	for _, provider := range []string{"coingate", "btcpay", "nowpayments", "bitpay", "unknown"} {
+		_, err := usecase.NewSandboxDecoder(provider)
+		require.Error(t, err, "provider %q must not get a sandbox decoder", provider)
+	}
+}

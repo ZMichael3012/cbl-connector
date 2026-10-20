@@ -1,6 +1,7 @@
 package usecase
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 
 	eventsv1 "github.com/cbl/cbl-protos/gen/go/billing/events/v1"
 
+	"github.com/cbl/cbl-kit/inbox"
 	"github.com/cbl/cbl-kit/money"
 	"github.com/cbl/cbl-kit/outbox"
 
@@ -106,4 +108,22 @@ func TestCanonicalEventTypeMapping(t *testing.T) {
 	for state, want := range cases {
 		assert.Equal(t, want, canonicalEventType(state), string(state))
 	}
+}
+
+func TestNormalizerEmptyRegistryFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	registry, err := NewDecoderRegistry()
+	require.NoError(t, err)
+	normalizer := NewNormalizer(registry, nil)
+
+	wire, err := proto.Marshal(&eventsv1.GatewayWebhookRaw{
+		Provider:       "mock",
+		RawBody:        []byte(`{"payment_id":"p"}`),
+		SignatureState: eventsv1.WebhookSignatureState_WEBHOOK_SIGNATURE_STATE_VERIFIED,
+	})
+	require.NoError(t, err)
+
+	err = normalizer.Handle(context.Background(), nil, inbox.Message{Value: wire})
+	require.ErrorIs(t, err, domain.ErrUnknownProvider, "the decode path fails closed without a decoder")
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	eventsv1 "github.com/cbl/cbl-protos/gen/go/billing/events/v1"
@@ -49,4 +50,38 @@ func NewDecoderRegistry(decoders ...WebhookDecoder) (*DecoderRegistry, error) {
 func (r *DecoderRegistry) Decoder(provider string) (WebhookDecoder, bool) {
 	decoder, ok := r.decoders[strings.ToLower(strings.TrimSpace(provider))]
 	return decoder, ok
+}
+
+// MissingDecoders returns the configured providers that require a decoder but
+// have none: a provider is required when it is configured (the runtime
+// predicate, for example a registered gateway) and its manifest is not
+// fetch-mandatory. Sandbox providers are excluded: without a decoder their
+// deliveries fail closed at runtime (ErrUnknownProvider, retry/DLQ). The result
+// is sorted so the startup error and log are deterministic.
+func MissingDecoders(manifests []domain.ProviderManifest, configured func(provider string) bool, decoders []WebhookDecoder) []string {
+	available := make(map[string]struct{}, len(decoders))
+	for _, decoder := range decoders {
+		if decoder == nil {
+			continue
+		}
+		available[strings.ToLower(strings.TrimSpace(decoder.Provider()))] = struct{}{}
+	}
+	missing := make([]string, 0)
+	for _, manifest := range manifests {
+		provider := strings.ToLower(strings.TrimSpace(manifest.ID))
+		if manifest.Sandbox || manifest.FetchMandatory {
+			continue
+		}
+		if configured != nil && !configured(provider) {
+			continue
+		}
+		if _, ok := available[provider]; !ok {
+			missing = append(missing, provider)
+		}
+	}
+	sort.Strings(missing)
+	if len(missing) == 0 {
+		return nil
+	}
+	return missing
 }

@@ -165,8 +165,15 @@ func main() {
 	for _, runtime := range runtimes {
 		gateways[runtime.Provider()] = runtime.Gateway()
 	}
+	// The sandbox decoder set: unset means the default mock profile, while a
+	// set-but-empty value disables sandbox decoding (a fetch-mandatory-only
+	// deployment needs no decoder, CBL-17.28).
+	sandboxProviders := "mock"
+	if raw, set := os.LookupEnv("CONNECTOR_SANDBOX_PROVIDERS"); set {
+		sandboxProviders = raw
+	}
 	decoders := make([]usecase.WebhookDecoder, 0, 2)
-	for _, provider := range splitCSV(getenv("CONNECTOR_SANDBOX_PROVIDERS", "mock")) {
+	for _, provider := range splitCSV(sandboxProviders) {
 		decoder, decodeErr := usecase.NewSandboxDecoder(provider)
 		if decodeErr != nil {
 			log.Error("build sandbox decoder failed", zap.String("provider", provider), zap.Error(decodeErr))
@@ -174,8 +181,15 @@ func main() {
 		}
 		decoders = append(decoders, decoder)
 	}
-	if len(decoders) == 0 {
-		log.Error("CONNECTOR_SANDBOX_PROVIDERS is empty: no webhook decoders configured")
+	// Only a configured provider whose manifest is not fetch-mandatory needs a
+	// decoder; a sandbox provider without one fails closed at delivery time.
+	missingDecoders := usecase.MissingDecoders(domain.BuiltinManifests(), func(provider string) bool {
+		_, configured := gateways[provider]
+		return configured
+	}, decoders)
+	if len(missingDecoders) > 0 {
+		log.Error("no decoder configured for non-fetch-mandatory providers",
+			zap.Strings("providers", missingDecoders))
 		return
 	}
 	registry, err := usecase.NewDecoderRegistry(decoders...)
@@ -183,6 +197,7 @@ func main() {
 		log.Error("build decoder registry failed", zap.Error(err))
 		return
 	}
+	log.Info("webhook decoders configured", zap.Int("decoders", len(decoders)))
 	// The provider invoice mapping resolves platform payments of real provider
 	// webhooks (17.2, T-CONNECTOR-03); fetch_required deliveries resolve their
 	// status through the registered adapters (17.9).

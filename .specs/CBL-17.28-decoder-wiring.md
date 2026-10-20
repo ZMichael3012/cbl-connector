@@ -1,103 +1,95 @@
-# CBL-17.28 (cbl-connector). Decoder wiring: allow fetch-mandatory-only deployments
+# CBL-17.28 - Decoder wiring: allow fetch-mandatory-only deployments (cbl-connector)
 
-Status: DRAFT (scheduled, not started). The full architecture sketch and the test
-matrices are completed at task start per CBL-001.
+Task: CBL-17.28 in `CBL-004` (E17, W5-SCALE), depends on 17.2 and 17.9 (done).
+Repository: `cbl-connector`. Status: in progress.
 
-## 1. Context
+## 1. Problem and scope
 
-`cmd/connector/main.go` builds the webhook decoder registry from
-`CONNECTOR_SANDBOX_PROVIDERS` (default `mock`) and refuses to start when the list
-is empty:
+`cmd/connector/main.go` refuses to start when `CONNECTOR_SANDBOX_PROVIDERS` yields no
+decoder, although the normalizer needs a decoder only for the non-fetch-mandatory path
+(`fetch_required` deliveries and providers without `fetch_mandatory`). Every real provider
+manifest is fetch-mandatory, so a production deployment with real providers is rejected by
+the guard while the default `mock` masks it. `NewSandboxDecoder` also accepts any name
+(for example `coingate`), suggesting a provider decoder that would never be correct.
 
-```
-if len(decoders) == 0 {
-    log.Error("CONNECTOR_SANDBOX_PROVIDERS is empty: no webhook decoders configured")
-    return
-}
-```
+In scope: the startup decision, the empty-list semantics (set-but-empty disables the
+sandbox decoder), the sandbox name catalogue, the normalizer fail-closed coverage, the
+compose/.env/AGENTS documentation and the stand e2e in both configurations. Out of scope:
+provider adapters implementing `WebhookDecoder`, the mock pipeline contract and contract
+changes.
 
-The normalizer uses a decoder only for the non-fetch-mandatory path
-(`internal/usecase/normalizer.go`: `fetch_required` or `fetch_mandatory` ->
-`fetchCanonical`, otherwise `decodeCanonical`, which requires a decoder). Every
-real provider manifest (`coingate`, `nowpayments`, `bitpay`, `btcpay`) has
-`FetchMandatory: true`; only `mock` is a sandbox and uses the decoder. So a
-production deployment with real providers needs no decoder, yet the startup guard
-rejects an empty set. The default `mock` masks the guard, and
-`NewSandboxDecoder` accepts any provider name (for example `coingate`), which
-suggests a decoder that is never used.
+## 2. Architecture
 
-## 2. Goal
+- `usecase.MissingDecoders(manifests, configured, decoders) []string`: the single startup
+  decision. It returns the configured providers that need a decoder: non-sandbox manifests
+  with `FetchMandatory == false` and no registered decoder. The result is sorted, so the
+  startup log is deterministic. Sandbox providers are excluded: without a decoder their
+  deliveries fail closed at runtime, which is the existing normalizer behavior.
+- `main`: builds the sandbox decoders from the variable with `os.LookupEnv` semantics
+  (`unset` -> `mock`, `set-but-empty` -> no decoders), computes the missing set against the
+  **configured gateways** (the same predicate as the runtime), fails startup with the
+  provider names when the set is non-empty, and otherwise builds the registry (an empty
+  registry is valid).
+- `usecase.NewSandboxDecoder`: accepts only the closed sandbox catalogue (today `mock`);
+  an unknown or real provider name is a startup error.
+- The normalizer is unchanged: a non-fetch-mandatory delivery without a decoder returns
+  `ErrUnknownProvider`, the inbox retries and the message reaches the DLQ.
 
-Make the startup decision match the actual runtime need, without weakening the
-fail-closed behavior of the decode path:
+Trade-off T-CONNECTOR-33: the startup validates only configured providers; a provider
+added to the allowlist without a base URL is not checked until it is configured (it cannot
+deliver webhooks anyway). The fail-closed runtime error covers the decode path.
 
-- an empty decoder set is allowed when no enabled provider needs the decode path;
-- a non-fetch-mandatory delivery without a decoder still fails closed (retry/DLQ)
-  with an explicit error;
-- the sandbox decoder names are constrained to the known sandbox set;
-- the env/AGENTS documentation states the real meaning of the variable.
+## 3. Test plan
 
-## 3. Scope
+| ID | Case | Expectation |
+| :-- | :-- | :-- |
+| D1 | btcpay configured, no decoders | MissingDecoders is empty, startup allowed |
+| D2 | a non-fetch-mandatory provider configured, no decoder | the provider is reported |
+| D3 | same provider with its decoder | empty |
+| D4 | the non-fetch-mandatory provider not configured | empty (no requirement) |
+| D5 | a sandbox provider configured, no decoder | empty (runtime fail-closed) |
+| D6 | two missing providers | sorted, deterministic |
+| D7 | `NewSandboxDecoder("mock")` / `"Mock"` | accepted |
+| D8 | `NewSandboxDecoder("coingate")` / `"unknown"` | error |
+| D9 | empty decoder registry + a non-fetch-mandatory delivery | `ErrUnknownProvider` (inbox retry/DLQ) |
+| D10 | `CONNECTOR_SANDBOX_PROVIDERS` unset vs set-but-empty | mock decoder vs zero decoders |
 
-In scope: `cmd/connector/main.go` startup validation, the decoder registry
-construction (optionally extracted into a testable decision helper),
-`internal/usecase/sandbox_decoder.go` name validation, the unit tests of the
-startup matrix and the normalizer path, the AGENTS/env docs, the stand e2e for
-both configurations.
+Integration: the normalizer registry path is unit/integration covered (D9); no new
+testcontainers case.
+E2E: (a) `CONNECTOR_PROVIDERS=btcpay`, `CONNECTOR_SANDBOX_PROVIDERS=` empty: the service
+starts, logs zero decoders, CreateInvoice/GetGatewayPayment work; (b) the default stand:
+the mock decoder is configured and the smoke passes. Both on the compose stand with
+artifacts under `test/e2e/.runs/<mark>/`.
 
-Out of scope: provider adapters implementing `WebhookDecoder` (not needed while
-`fetch_mandatory` holds), the mock pipeline contract, contract changes (no
-`cbl-protos`).
+## 4. Red evidence
 
-## 4. Proposed design (to confirm at task start)
+Recorded 20.10.2026: `go test ./internal/usecase` failed with `undefined:
+usecase.MissingDecoders`; the sandbox constructor accepted `coingate`, `btcpay`,
+`nowpayments` and `bitpay` before the closed catalogue (the new D8 test failed); the
+old startup guard rejected an empty decoder list by construction (the e2e stand A was
+not startable before the fix).
 
-1. Compute the set of enabled providers (the `CONNECTOR_PROVIDERS` allowlist and
-   the configured base URLs, the same predicate as the gateway construction).
-2. A decoder requirement exists only for an enabled provider whose manifest has
-   `FetchMandatory == false` (today only `mock`).
-3. If no decoder is configured and a requirement exists -> startup failure with
-   the provider names; if no requirement exists -> start with an empty registry.
-4. `NewSandboxDecoder` rejects names outside the sandbox catalogue (today
-   `mock`; a new sandbox profile is an explicit additive change).
-5. The runner logs the decoder set and the fetch-mandatory providers at startup
-   for operability.
-6. Keep the default `CONNECTOR_SANDBOX_PROVIDERS=mock` for the stands; document
-   that production sets it to an empty value (or omits the mock) when only
-   real providers are enabled.
+## 5. Results and review closure (20.10.2026)
 
-## 5. Acceptance criteria
-
-- With all enabled providers fetch-mandatory and `CONNECTOR_SANDBOX_PROVIDERS=""`,
-  the service starts and the mock profile is unavailable (no decoder).
-- With `CONNECTOR_SANDBOX_PROVIDERS=mock` the service starts and the mock webhook
-  path behaves exactly as today.
-- A non-fetch-mandatory delivery for a provider without a decoder returns the
-  explicit unknown-provider error; the inbox moves it to the retry topics/DLQ; a
-  unit test pins it.
-- An unknown sandbox name fails the startup with a clear message.
-- AGENTS, `.env.example`/compose comments and the runbook describe the variable
-  correctly (sandbox/non-fetch-mandatory decoders, not a production requirement).
-- 4 review passes, unit+integration coverage at least 80%, the service e2e for
-  both configurations, the global stand unaffected.
-
-## 6. Test plan outline (full matrix at task start)
-
-- Unit: the startup decision matrix (allowlist/base URL/enabled provider x
-  `FetchMandatory` x decoder set); `NewSandboxDecoder` name validation; the
-  normalizer unknown-provider error.
-- Integration: main-level wiring cannot be unit-tested directly; extract the
-  decision helper and test it; keep the normalizer integration unchanged.
-- E2E: the service/global stand with `CONNECTOR_PROVIDERS=btcpay` and an empty
-  decoder list (starts, invoices work, a mock webhook is not expected); the mock
-  stand with the default list (GE webhook path green).
-
-## 7. Dependencies and references
-
-- Depends on: 17.2 (manifests, fetch-to-verify), 17.9 (BTCPay), both done.
-- References: `cmd/connector/main.go` (the guard), `internal/usecase/normalizer.go`
-  (`Handle`, `decodeCanonical`), `internal/usecase/decoder.go`,
-  `internal/usecase/sandbox_decoder.go`, `internal/domain/manifest.go`.
-- Trade-off candidate (T-CONNECTOR-30): "startup validates only the enabled
-  providers' decoder needs" with the pros/cons (a misconfigured non-enabled
-  provider is caught at delivery time, not startup) to be recorded in the spec
-  and AGENTS.
+- D1 - D10 green; empty registry through the normalizer returns
+  `ErrUnknownProvider` (D9), which the inbox routes to retry/DLQ.
+- Coverage 82.3% (`-coverpkg=./internal/...`), golangci-lint 0, go vet clean, em dash
+  check green.
+- E2E stand A `20261020t084425z` PASS: `CONNECTOR_PROVIDERS=btcpay`, empty decoder list
+  (compose `--env-file`, since cmd removes an empty `set` variable): decoders=0, no
+  startup error, invoice PENDING/New.
+- E2E stand B `20261020t085032z` PASS: default configuration, decoders=1, mock-gateway
+  healthy; the mock decode path is unchanged and covered by the normalizer suites.
+- Review pass 1 (no-context): the semantics of unset vs set-but-empty are explicit in
+  the env, compose and AGENTS; the decision matrix covers fetch-mandatory, sandbox and
+  non-configured providers.
+- Review pass 2 (architecture): the decision lives in `usecase.MissingDecoders` (one
+  implementation, unit-tested) and uses the configured gateways as the predicate; no
+  startup logic is duplicated in main.
+- Review pass 3 (with-context, blocking): the default stand must keep the mock decoder.
+  Closed: the compose default is `${CONNECTOR_SANDBOX_PROVIDERS-mock}` (unset -> mock),
+  and both stands were run; the binary log line is stable for e2e greps.
+- Review pass 4 (security): closing the sandbox catalogue prevents a real provider name
+  from being decoded with the sandbox JSON format (which would canonicalize untrusted
+  unsigned fields); a delivery without a decoder still fails closed; no secrets are
+  logged.

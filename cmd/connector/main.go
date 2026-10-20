@@ -4,10 +4,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -31,7 +29,6 @@ import (
 	"github.com/cbl/cbl-kit/grpcmw"
 	"github.com/cbl/cbl-kit/inbox"
 	"github.com/cbl/cbl-kit/inbox/kafkaconsumer"
-	"github.com/cbl/cbl-kit/money"
 	"github.com/cbl/cbl-kit/outbox"
 	"github.com/cbl/cbl-kit/outbox/kafkapub"
 	"github.com/cbl/cbl-kit/ratelimit"
@@ -41,10 +38,7 @@ import (
 
 	"github.com/cbl/cbl-connector/internal/domain"
 	"github.com/cbl/cbl-connector/internal/gateway"
-	"github.com/cbl/cbl-connector/internal/providers/bitpay"
-	"github.com/cbl/cbl-connector/internal/providers/btcpay"
-	"github.com/cbl/cbl-connector/internal/providers/coingate"
-	"github.com/cbl/cbl-connector/internal/providers/nowpayments"
+	"github.com/cbl/cbl-connector/internal/providerruntime"
 	"github.com/cbl/cbl-connector/internal/storage"
 	"github.com/cbl/cbl-connector/internal/transport"
 	"github.com/cbl/cbl-connector/internal/usecase"
@@ -112,102 +106,65 @@ func main() {
 		}
 		return slices.Contains(providerAllow, id)
 	}
-	gateways := map[string]domain.PaymentGateway{}
-	// The Redis scripter backs the provider rate limiter when Redis is configured.
+	// Redis backs the provider rate limits and the routing/capability caches;
+	// its absence is not fatal (the local limiter and live sources are used).
 	var redisScripter redis.Scripter
-	if base := strings.TrimSpace(os.Getenv("CONNECTOR_BITPAY_BASE_URL")); base != "" && providerEnabled("bitpay") {
-		capabilities, capsErr := capabilitiesFromEnv(os.Getenv("CONNECTOR_BITPAY_CAPABILITIES"))
-		if capsErr != nil {
-			log.Error("parse CONNECTOR_BITPAY_CAPABILITIES failed", zap.Error(capsErr))
-			return
-		}
-		adapter, adapterErr := bitpay.New(bitpay.Config{
-			BaseURL:       base,
-			APIToken:      os.Getenv("CONNECTOR_BITPAY_API_TOKEN"),
-			PrivateKeyPEM: os.Getenv("CONNECTOR_BITPAY_PRIVATE_KEY_PEM"),
-			WebhookSecret: []byte(os.Getenv("CONNECTOR_BITPAY_WEBHOOK_SECRET")),
-			WebhookURL:    os.Getenv("CONNECTOR_BITPAY_WEBHOOK_URL"),
-			BuyerEmail:    os.Getenv("CONNECTOR_BITPAY_BUYER_EMAIL"),
-			Capabilities:  capabilities,
-			Timeout:       durationEnv(log, "CONNECTOR_BITPAY_TIMEOUT", 10*time.Second),
+	var ruleCache usecase.RouteConfigCacheStore
+	var capabilityCache usecase.CapabilityCache
+	if redisAddr := os.Getenv("REDIS_ADDR"); redisAddr != "" {
+		redisClient := redis.NewClient(&redis.Options{
+			Addr:                  redisAddr,
+			Password:              os.Getenv("REDIS_PASSWORD"),
+			DialTimeout:           200 * time.Millisecond,
+			ReadTimeout:           100 * time.Millisecond,
+			WriteTimeout:          100 * time.Millisecond,
+			ContextTimeoutEnabled: true,
 		})
-		if adapterErr != nil {
-			log.Error("build bitpay adapter failed", zap.Error(adapterErr))
-			return
-		}
-		gateways["bitpay"] = gateway.New(adapter, gateway.ConfigFromEnv(os.Getenv), gateway.WithLogger(log))
-		log.Info("bitpay adapter configured", zap.String("base_url", base))
-	}
-	if base := strings.TrimSpace(os.Getenv("CONNECTOR_BTCPAY_BASE_URL")); base != "" && providerEnabled("btcpay") {
-		capabilities, capsErr := capabilitiesFromEnv(os.Getenv("CONNECTOR_BTCPAY_CAPABILITIES"))
-		if capsErr != nil {
-			log.Error("parse CONNECTOR_BTCPAY_CAPABILITIES failed", zap.Error(capsErr))
-			return
-		}
-		adapter, adapterErr := btcpay.New(btcpay.Config{
-			BaseURL:       base,
-			StoreID:       os.Getenv("CONNECTOR_BTCPAY_STORE_ID"),
-			APIToken:      os.Getenv("CONNECTOR_BTCPAY_API_TOKEN"),
-			WebhookSecret: []byte(os.Getenv("CONNECTOR_BTCPAY_WEBHOOK_SECRET")),
-			Capabilities:  capabilities,
-			Timeout:       durationEnv(log, "CONNECTOR_BTCPAY_TIMEOUT", 10*time.Second),
-		})
-		if adapterErr != nil {
-			log.Error("build btcpay adapter failed", zap.Error(adapterErr))
-			return
-		}
-		// Every external call goes through the shared resilience stack (plan
-		// 14.5.3): bulkhead, retries with jitter, breaker and attempt timeouts.
-		// The manifest limiter of the provider is wired when it configures a
-		// rate limit (the BTCPay stand declares none).
-		gateways["btcpay"] = gateway.New(adapter, gateway.ConfigFromEnv(os.Getenv), gateway.WithLogger(log))
-		log.Info("btcpay adapter configured", zap.String("base_url", base))
-	}
-	if base := strings.TrimSpace(os.Getenv("CONNECTOR_COINGATE_BASE_URL")); base != "" && providerEnabled("coingate") {
-		capabilities, capsErr := capabilitiesFromEnv(os.Getenv("CONNECTOR_COINGATE_CAPABILITIES"))
-		if capsErr != nil {
-			log.Error("parse CONNECTOR_COINGATE_CAPABILITIES failed", zap.Error(capsErr))
-			return
-		}
-		adapter, adapterErr := coingate.New(coingate.Config{
-			BaseURL:       base,
-			APIToken:      os.Getenv("CONNECTOR_COINGATE_API_TOKEN"),
-			IPNToken:      []byte(os.Getenv("CONNECTOR_COINGATE_IPN_TOKEN")),
-			CallbackURL:   os.Getenv("CONNECTOR_COINGATE_CALLBACK_URL"),
-			PriceCurrency: os.Getenv("CONNECTOR_COINGATE_PRICE_CURRENCY"),
-			Capabilities:  capabilities,
-			Timeout:       durationEnv(log, "CONNECTOR_COINGATE_TIMEOUT", 10*time.Second),
-		})
-		if adapterErr != nil {
-			log.Error("build coingate adapter failed", zap.Error(adapterErr))
-			return
-		}
-		gateways["coingate"] = gateway.New(adapter, gateway.ConfigFromEnv(os.Getenv), gateway.WithLogger(log))
-		log.Info("coingate adapter configured", zap.String("base_url", base))
-	}
-	if base := strings.TrimSpace(os.Getenv("CONNECTOR_NOWPAYMENTS_BASE_URL")); base != "" && providerEnabled("nowpayments") {
-		capabilities, capsErr := capabilitiesFromEnv(os.Getenv("CONNECTOR_NOWPAYMENTS_CAPABILITIES"))
-		if capsErr != nil {
-			log.Error("parse CONNECTOR_NOWPAYMENTS_CAPABILITIES failed", zap.Error(capsErr))
-			return
-		}
-		adapter, adapterErr := nowpayments.New(nowpayments.Config{
-			BaseURL:       base,
-			APIKey:        os.Getenv("CONNECTOR_NOWPAYMENTS_API_KEY"),
-			IPNSecret:     []byte(os.Getenv("CONNECTOR_NOWPAYMENTS_IPN_SECRET")),
-			PriceCurrency: os.Getenv("CONNECTOR_NOWPAYMENTS_PRICE_CURRENCY"),
-			CallbackURL:   os.Getenv("CONNECTOR_NOWPAYMENTS_CALLBACK_URL"),
-			Capabilities:  capabilities,
-			Timeout:       durationEnv(log, "CONNECTOR_NOWPAYMENTS_TIMEOUT", 10*time.Second),
-		})
-		if adapterErr != nil {
-			log.Error("build nowpayments adapter failed", zap.Error(adapterErr))
-			return
-		}
-		gateways["nowpayments"] = gateway.New(adapter, gateway.ConfigFromEnv(os.Getenv), gateway.WithLogger(log))
-		log.Info("nowpayments adapter configured", zap.String("base_url", base))
+		defer func() { _ = redisClient.Close() }()
+		redisScripter = redisClient
+		ruleCache = storage.NewRouteConfigCache(redisClient)
+		capabilityCache = storage.NewCapabilitiesCache(redisClient)
 	}
 
+	// Provider runtimes (CBL-17.20): the core consumes gateways and manifests
+	// through the runtime seam; the in-process factories own adapter
+	// construction. CONNECTOR_PROVIDERS filters providers before their factory
+	// runs; a provider without a base URL stays fail-closed (no gateway).
+	runtimeRegistry, err := providerruntime.NewRegistry(providerruntime.BuiltinFactories()...)
+	if err != nil {
+		log.Error("build provider runtime registry failed", zap.Error(err))
+		return
+	}
+	runtimes, err := runtimeRegistry.Build(providerruntime.Config{
+		Getenv:    os.Getenv,
+		Log:       log,
+		Enabled:   providerEnabled,
+		Manifests: manifestRegistry.Lookup,
+		Limiters: func(provider string, spec domain.RateLimitSpec) (gateway.Limiter, error) {
+			limitConfig := ratelimit.Config{Burst: spec.Burst, RefillInterval: spec.RefillInterval}
+			local, localErr := ratelimit.NewLocal(limitConfig)
+			if localErr != nil {
+				return nil, localErr
+			}
+			if redisScripter == nil {
+				return local, nil
+			}
+			return ratelimit.NewRedis(redisScripter, limitConfig)
+		},
+	})
+	if err != nil {
+		log.Error("build provider runtimes failed", zap.Error(err))
+		return
+	}
+	defer func() {
+		if closeErr := providerruntime.Close(runtimes); closeErr != nil {
+			log.Warn("close provider runtimes failed", zap.Error(closeErr))
+		}
+	}()
+	gateways := make(map[string]domain.PaymentGateway, len(runtimes))
+	for _, runtime := range runtimes {
+		gateways[runtime.Provider()] = runtime.Gateway()
+	}
 	decoders := make([]usecase.WebhookDecoder, 0, 2)
 	for _, provider := range splitCSV(getenv("CONNECTOR_SANDBOX_PROVIDERS", "mock")) {
 		decoder, decodeErr := usecase.NewSandboxDecoder(provider)
@@ -242,53 +199,6 @@ func main() {
 	// cache, and its absence or failure does not affect the selection. The provider
 	// registry and the Router are wired in task 3.2 (KI-01).
 	ruleStore := storage.NewRouteRulesRepository(db)
-	var ruleCache usecase.RouteConfigCacheStore
-	var capabilityCache usecase.CapabilityCache
-	if redisAddr := os.Getenv("REDIS_ADDR"); redisAddr != "" {
-		redisClient := redis.NewClient(&redis.Options{
-			Addr:                  redisAddr,
-			Password:              os.Getenv("REDIS_PASSWORD"),
-			DialTimeout:           200 * time.Millisecond,
-			ReadTimeout:           100 * time.Millisecond,
-			WriteTimeout:          100 * time.Millisecond,
-			ContextTimeoutEnabled: true,
-		})
-		defer func() { _ = redisClient.Close() }()
-		redisScripter = redisClient
-		ruleCache = storage.NewRouteConfigCache(redisClient)
-		capabilityCache = storage.NewCapabilitiesCache(redisClient)
-	}
-	// The manifest rate limiter (17.2 FR-7, T-CONNECTOR-16): providers with a
-	// configured bucket are wrapped by gateway.Limited (the Redis bucket when
-	// available, the local one otherwise); BTCPay declares none.
-	for provider, registered := range gateways {
-		manifest, ok := manifestRegistry.Lookup(provider)
-		if !ok || manifest.RateLimit.Burst <= 0 {
-			continue
-		}
-		limitConfig := ratelimit.Config{Burst: manifest.RateLimit.Burst, RefillInterval: manifest.RateLimit.RefillInterval}
-		local, localErr := ratelimit.NewLocal(limitConfig)
-		if localErr != nil {
-			log.Error("build provider limiter failed", zap.String("provider", provider), zap.Error(localErr))
-			return
-		}
-		var limiter gateway.Limiter = local
-		if redisScripter != nil {
-			redisLimiter, redisErr := ratelimit.NewRedis(redisScripter, limitConfig)
-			if redisErr != nil {
-				log.Error("build redis provider limiter failed", zap.String("provider", provider), zap.Error(redisErr))
-				return
-			}
-			limiter = redisLimiter
-		}
-		limited, limitedErr := gateway.NewLimited(registered, limiter, provider)
-		if limitedErr != nil {
-			log.Error("wrap provider limiter failed", zap.String("provider", provider), zap.Error(limitedErr))
-			return
-		}
-		gateways[provider] = limited
-		log.Info("provider rate limiter wired", zap.String("provider", provider), zap.Int("burst", manifest.RateLimit.Burst))
-	}
 
 	// The fetcher and the normalizer are built after the wrappers so the
 	// fetch-to-verify path passes the resilience and limiter stack too.
@@ -566,90 +476,4 @@ func splitCSV(raw string) []string {
 		}
 	}
 	return values
-}
-
-// capabilityEnvRow describes one network row of the adapter capabilities env.
-type capabilityEnvRow struct {
-	Network       string `json:"network"`
-	Asset         string `json:"asset"`
-	MinMinor      int64  `json:"min_minor"`
-	MaxMinor      int64  `json:"max_minor"`
-	Decimals      uint32 `json:"decimals"`
-	Confirmations uint32 `json:"confirmations"`
-}
-
-// capabilitiesFromEnv parses the adapter capability rows of the deployment
-// (the catalog artifact 17.21 replaces this configuration later); unknown
-// fields, duplicate networks, missing decimals and inverted bounds fail fast
-// (spec E-7).
-func capabilitiesFromEnv(raw string) (domain.Capabilities, error) {
-	decoder := json.NewDecoder(strings.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	var rows []capabilityEnvRow
-	if err := decoder.Decode(&rows); err != nil {
-		return domain.Capabilities{}, fmt.Errorf("capabilities env: %w", err)
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return domain.Capabilities{}, errors.New("capabilities env: unexpected trailing json")
-	}
-	if len(rows) == 0 {
-		return domain.Capabilities{}, errors.New("capabilities env: no rows")
-	}
-	networks := make(map[string]domain.NetworkCapability, len(rows))
-	for _, row := range rows {
-		network := strings.TrimSpace(row.Network)
-		asset := strings.ToUpper(strings.TrimSpace(row.Asset))
-		if network == "" || asset == "" {
-			return domain.Capabilities{}, errors.New("capabilities env: network and asset are required")
-		}
-		if row.Decimals == 0 {
-			return domain.Capabilities{}, fmt.Errorf("capabilities env: decimals are required for network %q", network)
-		}
-		if row.MinMinor < 0 || row.MaxMinor < 0 {
-			return domain.Capabilities{}, fmt.Errorf("capabilities env: negative bounds for network %q", network)
-		}
-		if row.MaxMinor != 0 && row.MaxMinor < row.MinMinor {
-			return domain.Capabilities{}, fmt.Errorf("capabilities env: max below min for network %q", network)
-		}
-		if _, duplicate := networks[network]; duplicate {
-			return domain.Capabilities{}, fmt.Errorf("capabilities env: duplicate network %q", network)
-		}
-		minAmount, err := money.New(row.MinMinor, asset, row.Decimals)
-		if err != nil {
-			return domain.Capabilities{}, fmt.Errorf("capabilities env: min amount: %w", err)
-		}
-		maximum := money.Money{Asset: asset, Decimals: row.Decimals}
-		if row.MaxMinor != 0 {
-			maximum, err = money.New(row.MaxMinor, asset, row.Decimals)
-			if err != nil {
-				return domain.Capabilities{}, fmt.Errorf("capabilities env: max amount: %w", err)
-			}
-		}
-		networks[network] = domain.NetworkCapability{
-			Asset:             asset,
-			MinAmount:         minAmount,
-			MaxAmount:         maximum,
-			ConfirmationDepth: row.Confirmations,
-		}
-	}
-	return domain.Capabilities{Networks: networks}, nil
-}
-
-// durationEnv reads a duration from an environment variable; an invalid value
-// falls back to the default with a warning.
-func durationEnv(log *zap.Logger, key string, fallback time.Duration) time.Duration {
-	raw := os.Getenv(key)
-	if raw == "" {
-		return fallback
-	}
-	parsed, err := time.ParseDuration(raw)
-	if err != nil || parsed <= 0 {
-		log.Warn("invalid duration env, using default",
-			zap.String("key", key),
-			zap.String("value", raw),
-			zap.Duration("default", fallback),
-		)
-		return fallback
-	}
-	return parsed
 }
